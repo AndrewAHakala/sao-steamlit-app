@@ -1,0 +1,28 @@
+# Streamlit App Dependencies
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.18.0
+
+# dbt Cloud API
+requests>=2.31.0
+pydantic>=2.5.0
+
+# Synthetic Data Generation
+data-designer>=0.1.5  # NVIDIA NeMo Data Designer (optional, AI-powered)
+faker>=22.0.0          # Faker for fast local data generation
+openai>=1.3.0          # OpenAI for schema generation
+
+# Snowflake Integration
+snowflake-connector-python>=3.5.0
+snowflake-snowpark-python>=1.11.0
+
+# Utilities
+python-dotenv>=1.0.0
+pyyaml>=6.0.1
+jinja2>=3.1.2
+httpx>=0.25.0
+
+# For cost calculations
+scipy>=1.11.0
+

@@ -1,0 +1,13 @@
+# Snowflake Streamlit Environment Configuration
+name: sao_estimator
+channels:
+  - snowflake
+dependencies:
+  - streamlit
+  - pandas
+  - numpy
+  - plotly
+  - requests
+  - pyyaml
+  - jinja2
+
