@@ -92,14 +92,14 @@ Generate a realistic raw data schema that would be found in this company's sourc
 - Use realistic column names specific to this business domain
 
 ## Column Types (Snowflake-compatible)
-- VARCHAR: For ALL columns ending in "_id" (identifiers must always be VARCHAR to avoid type conflicts across tables), names, descriptions, statuses, categories
-- INTEGER: For counts, quantities (NEVER use INTEGER for _id columns)
+- INTEGER: For ALL columns ending in "_id" (identifiers must always be INTEGER for reliable joins)
+- VARCHAR: For names, descriptions, statuses, categories, emails, addresses
 - DECIMAL: For money, percentages, measurements
 - TIMESTAMP: For dates and times
 - BOOLEAN: For flags and binary states
 - DATE: For date-only fields
 
-## CRITICAL: All columns whose name ends in "_id" MUST use type "VARCHAR", not "INTEGER".
+## CRITICAL: All columns whose name ends in "_id" MUST use type "INTEGER", not "VARCHAR".
 
 ## Response Format
 Return ONLY valid JSON with this exact structure (no markdown, no explanation):
@@ -141,11 +141,11 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                     content = re.sub(r'^```(?:json)?\n?', '', content)
                     content = re.sub(r'\n?```$', '', content)
                 schema = json.loads(content)
-                # Force all _id columns to VARCHAR to prevent type conflicts across tables
+                # Force all _id columns to INTEGER for reliable joins
                 for source in schema.get("sources", []):
                     for col in source.get("columns", []):
                         if col.get("name", "").lower().endswith("_id") or col.get("name", "").lower() == "id":
-                            col["type"] = "VARCHAR"
+                            col["type"] = "INTEGER"
                 return schema
             else:
                 return {"error": f"API Error: {response.status_code} - {response.text[:200]}"}
@@ -162,7 +162,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "customers",
                 "description": "Customer master data",
                 "columns": [
-                    {"name": "customer_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique customer identifier"},
+                    {"name": "customer_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique customer identifier"},
                     {"name": "first_name", "type": "VARCHAR", "description": "Customer first name"},
                     {"name": "last_name", "type": "VARCHAR", "description": "Customer last name"},
                     {"name": "email", "type": "VARCHAR", "description": "Customer email address"},
@@ -173,8 +173,8 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "orders",
                 "description": "Order transactions",
                 "columns": [
-                    {"name": "order_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique order identifier"},
-                    {"name": "customer_id", "type": "VARCHAR", "description": "Reference to customer"},
+                    {"name": "order_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique order identifier"},
+                    {"name": "customer_id", "type": "INTEGER", "description": "Reference to customer"},
                     {"name": "order_date", "type": "TIMESTAMP", "description": "Order placement date"},
                     {"name": "total_amount", "type": "DECIMAL", "description": "Total order value"},
                     {"name": "status", "type": "VARCHAR", "description": "Order status"},
@@ -184,7 +184,7 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "products",
                 "description": "Product catalog",
                 "columns": [
-                    {"name": "product_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique product identifier"},
+                    {"name": "product_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique product identifier"},
                     {"name": "product_name", "type": "VARCHAR", "description": "Product name"},
                     {"name": "category", "type": "VARCHAR", "description": "Product category"},
                     {"name": "price", "type": "DECIMAL", "description": "Product price"},
@@ -195,9 +195,9 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "order_items",
                 "description": "Line items for each order",
                 "columns": [
-                    {"name": "item_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique line item identifier"},
-                    {"name": "order_id", "type": "VARCHAR", "description": "Reference to order"},
-                    {"name": "product_id", "type": "VARCHAR", "description": "Reference to product"},
+                    {"name": "item_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique line item identifier"},
+                    {"name": "order_id", "type": "INTEGER", "description": "Reference to order"},
+                    {"name": "product_id", "type": "INTEGER", "description": "Reference to product"},
                     {"name": "quantity", "type": "INTEGER", "description": "Quantity ordered"},
                     {"name": "unit_price", "type": "DECIMAL", "description": "Price per unit"},
                 ]
@@ -206,8 +206,8 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "payments",
                 "description": "Payment records",
                 "columns": [
-                    {"name": "payment_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique payment identifier"},
-                    {"name": "order_id", "type": "VARCHAR", "description": "Reference to order"},
+                    {"name": "payment_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique payment identifier"},
+                    {"name": "order_id", "type": "INTEGER", "description": "Reference to order"},
                     {"name": "amount", "type": "DECIMAL", "description": "Payment amount"},
                     {"name": "payment_method", "type": "VARCHAR", "description": "Payment method used"},
                     {"name": "payment_date", "type": "TIMESTAMP", "description": "Payment timestamp"},
@@ -217,10 +217,10 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
                 "name": "inventory",
                 "description": "Product inventory levels",
                 "columns": [
-                    {"name": "inventory_id", "type": "VARCHAR", "is_primary_key": True, "description": "Unique inventory record"},
-                    {"name": "product_id", "type": "VARCHAR", "description": "Reference to product"},
+                    {"name": "inventory_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique inventory record"},
+                    {"name": "product_id", "type": "INTEGER", "description": "Reference to product"},
                     {"name": "quantity_on_hand", "type": "INTEGER", "description": "Current stock level"},
-                    {"name": "warehouse_id", "type": "VARCHAR", "description": "Warehouse location"},
+                    {"name": "warehouse_id", "type": "INTEGER", "description": "Warehouse location"},
                     {"name": "last_updated", "type": "TIMESTAMP", "description": "Last update timestamp"},
                 ]
             },
@@ -269,12 +269,88 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
         
         if isinstance(dataframes, dict) and "error" in dataframes:
             return dataframes
-        
+
+        # Reconcile schema with actual DataFrame columns to ensure dbt models
+        # reference only columns that actually exist in the generated data
+        schema = self._reconcile_schema_with_dataframes(schema, dataframes)
+
         total_rows = sum(len(df) for df in dataframes.values())
         st.success(f"✅ Generated {total_rows:,} total rows across {len(dataframes)} tables!")
-        
+
         return {"dataframes": dataframes, "schema": schema}
-    
+
+    def _reconcile_schema_with_dataframes(self, schema: dict, dataframes: dict) -> dict:
+        """Update schema to match actual DataFrame columns.
+
+        The GPT-generated schema may differ from what the Data Designer actually
+        produced. This ensures the schema (used for DDL and dbt project generation)
+        reflects the real columns in the generated data.
+        """
+        reconciled_sources = []
+        df_lookup = {k.lower(): (k, v) for k, v in dataframes.items()}
+
+        for source in schema.get("sources", []):
+            source_name = source["name"]
+            key = source_name.lower()
+
+            if key not in df_lookup:
+                # Table wasn't generated — keep original schema entry
+                reconciled_sources.append(source)
+                continue
+
+            _, df = df_lookup[key]
+            actual_cols = list(df.columns)
+
+            # Build a lookup of the original schema columns for metadata
+            original_col_map = {}
+            for col in source.get("columns", []):
+                # Match by sanitized uppercase name
+                sanitized = self._sanitize_col_name(col["name"]).upper()
+                original_col_map[sanitized] = col
+
+            # Build reconciled columns from actual DataFrame columns
+            reconciled_columns = []
+            for col_name in actual_cols:
+                col_upper = col_name.upper()
+                if col_upper in original_col_map:
+                    # Keep original metadata (type, description, is_primary_key, sample_values)
+                    orig = original_col_map[col_upper].copy()
+                    orig["name"] = col_upper  # Ensure uppercase
+                    reconciled_columns.append(orig)
+                else:
+                    # Column exists in data but not in schema — infer type from DataFrame
+                    dtype = str(df[col_name].dtype)
+                    if "int" in dtype:
+                        col_type = "INTEGER"
+                    elif "float" in dtype:
+                        col_type = "DECIMAL"
+                    elif "datetime" in dtype:
+                        col_type = "TIMESTAMP"
+                    elif "bool" in dtype:
+                        col_type = "BOOLEAN"
+                    else:
+                        col_type = "VARCHAR"
+
+                    is_pk = col_upper.endswith("_ID") and len(reconciled_columns) == 0
+                    reconciled_columns.append({
+                        "name": col_upper,
+                        "type": col_type,
+                        "description": col_upper.replace("_", " ").title(),
+                        "is_primary_key": is_pk,
+                    })
+
+            reconciled_source = {
+                "name": source_name,
+                "description": source.get("description", ""),
+                "columns": reconciled_columns,
+            }
+            reconciled_sources.append(reconciled_source)
+
+        return {
+            "sources": reconciled_sources,
+            "relationships": schema.get("relationships", []),
+        }
+
     def _generate_schema_with_gpt(self, customer_description: str, num_sources: int, sample_ddl: str = None, num_columns: int = 6) -> dict:
         """Use gpt-5-mini (fast) to generate RAW SOURCE schema with realistic sample values."""
         
@@ -284,8 +360,8 @@ Return ONLY valid JSON with this exact structure (no markdown, no explanation):
 REQUIREMENTS:
 - Exactly {num_sources} tables with {num_columns} columns each
 - Use operational table names (customers, orders, events, etc.) - NO dim_/fact_ prefixes
-- First column must be a primary key ending in _id (VARCHAR type)
-- ALL columns ending in _id MUST use VARCHAR type (never INTEGER for IDs)
+- First column must be a primary key ending in _id (INTEGER type)
+- ALL columns ending in _id MUST use INTEGER type (for reliable joins across tables)
 - Use Snowflake types: VARCHAR, INTEGER, DECIMAL, TIMESTAMP, DATE, BOOLEAN
 
 CRITICAL - Sample Values:
@@ -303,7 +379,7 @@ CRITICAL - Sample Values:
 JSON format (return ONLY valid JSON, no markdown):
 {{"sources":[
   {{"name":"table_name","description":"What this table stores","columns":[
-    {{"name":"column_id","type":"VARCHAR","is_primary_key":true}},
+    {{"name":"column_id","type":"INTEGER","is_primary_key":true}},
     {{"name":"column_name","type":"VARCHAR","sample_values":["realistic","business","specific","values"]}}
   ]}}
 ]}}"""
@@ -375,13 +451,13 @@ JSON format (return ONLY valid JSON, no markdown):
                 except:
                     return {"error": f"Failed to parse GPT response. The response may have been truncated. Try reducing the number of source tables."}
             
-            # Sanitize sample_values and normalize _id columns to VARCHAR
+            # Sanitize sample_values and normalize _id columns to INTEGER
             for source in result.get('sources', []):
                 for col in source.get('columns', []):
-                    # Force all _id columns to VARCHAR to prevent type conflicts
+                    # Force all _id columns to INTEGER for reliable joins
                     col_name = col.get("name", "").lower()
                     if col_name.endswith("_id") or col_name == "id":
-                        col["type"] = "VARCHAR"
+                        col["type"] = "INTEGER"
                     
                     if 'sample_values' in col and isinstance(col['sample_values'], list):
                         sanitized = []
@@ -442,12 +518,108 @@ JSON format (return ONLY valid JSON, no markdown):
                 st.success(f"  ✅ {table_name}: {len(df):,} rows ({idx + 1}/{num_sources})")
             
             progress_bar.empty()
-                
+
+            # Fix FK referential integrity — replace FK values in child tables
+            # with actual PK values sampled from parent tables
+            dataframes = self._fix_fk_referential_integrity(dataframes, schema)
+
         except Exception as e:
             return {"error": f"Data Designer error: {str(e)}"}
-        
+
         return dataframes
     
+    def _fix_fk_referential_integrity(self, dataframes: dict, schema: dict) -> dict:
+        """Post-process generated DataFrames so FK columns reference actual PK values.
+
+        Uses schema['relationships'] to identify FK→PK mappings, then replaces
+        FK column values in child tables with values sampled from the parent table's
+        PK column. Also ensures PK columns have unique sequential integer values.
+        """
+        import numpy as np
+
+        # Build case-insensitive lookup for dataframes
+        df_lookup = {k.upper(): k for k in dataframes}
+
+        # First pass: ensure all PK columns have unique sequential integer IDs
+        # and build a map of PK column name → (table_key, column_name) for FK inference
+        pk_column_map = {}  # e.g. {"CUSTOMER_ID": ("CUSTOMERS", "CUSTOMER_ID")}
+        for source in schema.get("sources", []):
+            table_name = source["name"]
+            df_key = df_lookup.get(table_name.upper())
+            if not df_key:
+                continue
+            df = dataframes[df_key]
+            for col in source.get("columns", []):
+                if col.get("is_primary_key"):
+                    col_name = col["name"]
+                    matching_cols = [c for c in df.columns if c.upper() == col_name.upper()]
+                    if matching_cols:
+                        actual_col = matching_cols[0]
+                        df[actual_col] = range(1, len(df) + 1)
+                        pk_column_map[col_name.upper()] = (df_key, actual_col)
+
+        # Build relationships list — use explicit ones from schema, plus infer
+        # from shared _id column names (FK in child table matches PK name in parent)
+        relationships = list(schema.get("relationships", []))
+        explicit_fks = {(r["from_table"].upper(), r["from_column"].upper()) for r in relationships}
+
+        for source in schema.get("sources", []):
+            table_name = source["name"]
+            df_key = df_lookup.get(table_name.upper())
+            if not df_key:
+                continue
+            for col in source.get("columns", []):
+                col_upper = col["name"].upper()
+                # Skip if this is the table's own PK
+                if col.get("is_primary_key"):
+                    continue
+                # If this _id column matches a PK column name from another table
+                if col_upper in pk_column_map and (table_name.upper(), col_upper) not in explicit_fks:
+                    parent_key, parent_col = pk_column_map[col_upper]
+                    if parent_key != df_key:  # Don't self-reference
+                        relationships.append({
+                            "from_table": table_name,
+                            "from_column": col["name"],
+                            "to_table": parent_key,
+                            "to_column": parent_col
+                        })
+
+        # Second pass: replace FK values with sampled PK values from parent tables
+        for rel in relationships:
+            from_table = rel.get("from_table", "").upper()
+            from_column = rel.get("from_column", "").upper()
+            to_table = rel.get("to_table", "").upper()
+            to_column = rel.get("to_column", "").upper()
+
+            child_key = df_lookup.get(from_table)
+            parent_key = df_lookup.get(to_table)
+
+            if not child_key or not parent_key:
+                continue
+
+            child_df = dataframes[child_key]
+            parent_df = dataframes[parent_key]
+
+            # Find matching columns (case-insensitive)
+            child_fk_cols = [c for c in child_df.columns if c.upper() == from_column]
+            parent_pk_cols = [c for c in parent_df.columns if c.upper() == to_column]
+
+            if not child_fk_cols or not parent_pk_cols:
+                continue
+
+            child_fk_col = child_fk_cols[0]
+            parent_pk_col = parent_pk_cols[0]
+
+            # Sample FK values from actual parent PK values
+            parent_pk_values = parent_df[parent_pk_col].dropna().values
+            if len(parent_pk_values) == 0:
+                continue
+
+            sampled_fks = np.random.choice(parent_pk_values, size=len(child_df), replace=True)
+            child_df[child_fk_col] = sampled_fks
+
+        return dataframes
+
     def _generate_single_table(self, data_designer, source: dict, num_rows: int) -> pd.DataFrame:
         """Generate a single table using Data Designer."""
         config_builder = DataDesignerConfigBuilder()
@@ -825,9 +997,9 @@ JSON format (return ONLY valid JSON, no markdown):
             for col in source.get("columns", []):
                 col_name = self._sanitize_ddl_column(col["name"])
                 col_lower = col["name"].lower()
-                # Force all _id columns to VARCHAR to prevent type conflicts in incremental models
+                # Use the schema-defined type for all columns
                 if col_lower.endswith("_id") or col_lower == "id":
-                    col_type = "VARCHAR(500)"
+                    col_type = "INTEGER"
                 else:
                     col_type = col.get("type", "VARCHAR").upper()
                     if col_type == "VARCHAR":
@@ -2670,11 +2842,88 @@ class SAOSimulationEngine:
 
 class DBTProjectGenerator:
     """Generates dbt model SQL files based on configuration."""
-    
+
     ENTITIES = ["customers", "orders", "products", "transactions", "events", "users", "accounts", "payments"]
     VERBS = ["joined", "filtered", "enriched", "aggregated", "pivoted"]
-    
-    def generate_models(self, pipeline_config: dict, schema: dict = None, 
+
+    def __init__(self):
+        self._model_columns = {}  # model_name -> list of {"name": str, "type": str}
+        self._source_schemas = {}  # lowercase source name -> schema entry with columns
+        self._relationships = []  # FK relationships from schema
+
+    # ---- Column metadata helpers ----
+
+    def _get_columns_for_source(self, entity: str) -> list:
+        """Get column list for a source table from the schema."""
+        entity_lower = entity.lower()
+        if entity_lower in self._source_schemas:
+            return self._source_schemas[entity_lower].get('columns', [])
+        return []
+
+    def _get_primary_key(self, entity: str) -> str:
+        """Return the primary key column name for a source table."""
+        for col in self._get_columns_for_source(entity):
+            if col.get('is_primary_key'):
+                return col['name'].upper()
+        # Fallback: first column ending in _id
+        for col in self._get_columns_for_source(entity):
+            if col['name'].lower().endswith('_id'):
+                return col['name'].upper()
+        return None
+
+    def _get_timestamp_column(self, columns: list) -> str:
+        """Find the first timestamp/date column in a column list."""
+        for col in columns:
+            ctype = col.get('type', '').upper()
+            cname = col['name'].lower()
+            if ctype in ('TIMESTAMP', 'TIMESTAMP_NTZ', 'TIMESTAMP_LTZ', 'DATE') or \
+               cname in ('created_at', 'updated_at', 'order_date', 'event_timestamp',
+                         'transaction_date', 'payment_date', 'last_updated'):
+                return col['name'].lower()
+        return None
+
+    def _get_numeric_columns(self, columns: list) -> list:
+        """Filter for numeric columns."""
+        numeric_types = ('DECIMAL', 'INTEGER', 'INT', 'NUMBER', 'FLOAT', 'DOUBLE', 'NUMERIC')
+        result = []
+        for col in columns:
+            ctype = col.get('type', '').upper()
+            cname = col['name'].lower()
+            if ctype in numeric_types or cname in ('amount', 'total_amount', 'price',
+                'unit_price', 'quantity', 'quantity_on_hand', 'inventory_count', 'rating'):
+                result.append(col)
+        return result
+
+    def _get_categorical_columns(self, columns: list) -> list:
+        """Filter for categorical/status columns."""
+        cat_names = ('status', 'type', 'category', 'tier', 'shipping_method',
+                     'payment_method', 'device_type', 'event_type', 'transaction_type')
+        return [c for c in columns if c['name'].lower() in cat_names]
+
+    def _get_varchar_columns(self, columns: list) -> list:
+        """Filter for VARCHAR columns excluding IDs."""
+        return [c for c in columns if c.get('type', '').upper() == 'VARCHAR'
+                and not c['name'].lower().endswith('_id')]
+
+    def _find_join_key(self, model_a_cols: list, model_b_cols: list) -> str:
+        """Find a shared _id column between two models for joining."""
+        a_names = {c['name'].lower() for c in model_a_cols}
+        b_names = {c['name'].lower() for c in model_b_cols}
+        shared = a_names & b_names
+        # Prefer _id columns
+        for name in sorted(shared):
+            if name.endswith('_id'):
+                return name
+        # Fall back to any shared column
+        if shared:
+            return sorted(shared)[0]
+        return None
+
+    def _get_model_columns(self, model_name: str) -> list:
+        """Get the output columns for a previously generated model."""
+        return self._model_columns.get(model_name, [])
+
+    def generate_models(self, pipeline_config: dict, schema: dict = None,
                         target_database: str = "RAW_DATA", target_schema: str = "PUBLIC") -> dict:
         """Generate dbt model SQL files respecting user-specified counts and materializations.
         
@@ -2704,6 +2953,11 @@ class DBTProjectGenerator:
         # These must match the actual table names in Snowflake (uppercase)
         self.available_entities = [t.lower() for t in source_tables]
         self.source_table_names = [t.upper() for t in source_tables]  # Actual Snowflake table names
+
+        # Build column metadata registries
+        self._model_columns = {}
+        self._source_schemas = {s['name'].lower(): s for s in schema.get('sources', [])}
+        self._relationships = schema.get('relationships', [])
         
         # Calculate target model counts by materialization type
         target_incremental_count = int(num_models * materialization['incremental'] / 100)
@@ -2928,13 +3182,14 @@ class DBTProjectGenerator:
         # Log DAG structure summary
         print(f"📊 DAG Structure: {len(staging_models)} staging → {len(int_layer1_models)} int_L1 → {len(int_layer2_models)} int_L2 → {len(int_layer3_models)} int_L3 → {len(marts_models)} marts → {reports_count} reports")
         
-        # ----- GENERATE GENERIC TESTS FILE -----
-        models["tests/generic/test_not_null_if_incremental.sql"] = self._generate_generic_test()
-        
+        # ----- GENERATE GENERIC TESTS (one per file) -----
+        models["tests/generic/test_not_null_if_incremental.sql"] = self._generate_generic_test_not_null_incremental()
+        models["tests/generic/test_positive_values.sql"] = self._generate_generic_test_positive_values()
+        models["tests/generic/test_not_in_future.sql"] = self._generate_generic_test_not_in_future()
+
         # ----- GENERATE SINGULAR TESTS -----
-        if 'row_count' in test_types or 'expression' in test_types:
-            models["tests/singular/assert_positive_values.sql"] = self._generate_singular_test_positive()
-            models["tests/singular/assert_no_orphans.sql"] = self._generate_singular_test_orphans()
+        models["tests/singular/assert_positive_values.sql"] = self._generate_singular_test_positive(marts_models)
+        models["tests/singular/assert_row_counts.sql"] = self._generate_singular_test_row_count(staging_models)
         
         # ----- GENERATE SEMANTIC MODELS (if enabled) -----
         if generate_semantic and all_marts:
@@ -2952,40 +3207,62 @@ class DBTProjectGenerator:
         
         return models
     
-    def _generate_schema_yml(self, layer: str, model_names: list, layer_description: str, 
+    def _generate_schema_yml(self, layer: str, model_names: list, layer_description: str,
                               test_types: list = None, schema: dict = None) -> str:
-        """Generate schema.yml file with documentation and tests.
-        
-        Each model has its own unique row_id column: {model_name}_row_id
+        """Generate schema.yml with tests on actual columns from the model registry.
+
+        Test strategy by layer:
+        - staging: not_null on PKs, FKs, and timestamps (source data should be complete)
+        - intermediate/marts: not_null only on PKs (LEFT JOINs can produce NULLs in other columns)
         """
         if test_types is None:
             test_types = ['not_null', 'unique']
-        
+
         models_yaml = []
-        
+
         for model_name in model_names:
-            # Each model has its own row_id column
-            row_id_col = f"{model_name}_row_id"
-            
-            # Build tests for the row_id column
-            row_id_tests = []
-            if 'not_null' in test_types:
-                row_id_tests.append("          - not_null")
-            if 'unique' in test_types:
-                row_id_tests.append("          - unique")
-            
+            cols = self._model_columns.get(model_name, [])
+            display_name = model_name.replace('_', ' ').title()
+
+            columns_yaml = []
+            for col in cols:
+                cname = col['name']
+                ctype = col.get('type', 'VARCHAR').upper()
+                is_pk = col.get('is_primary_key', False)
+
+                col_tests = []
+                if is_pk:
+                    # Primary key: unique + not_null in all layers
+                    col_tests.append("          - not_null")
+                    col_tests.append("          - unique")
+                elif layer == "staging":
+                    # In staging, source data should be complete — test FKs and timestamps
+                    if cname.endswith('_id'):
+                        col_tests.append("          - not_null")
+                    elif ctype in ('TIMESTAMP', 'TIMESTAMP_NTZ', 'DATE') or \
+                         cname in ('created_at', 'updated_at', 'order_date', 'event_timestamp'):
+                        col_tests.append("          - not_null")
+
+                # Intermediate and marts: no not_null tests on non-PK columns
+                # because LEFT JOINs and aggregations can produce NULLs
+
+                col_entry = f"      - name: {cname}\n        description: \"{cname.replace('_', ' ').title()}\""
+                if col_tests:
+                    col_entry += f"\n        data_tests:\n" + chr(10).join(col_tests)
+                columns_yaml.append(col_entry)
+
+            if not columns_yaml:
+                columns_yaml.append(f"      - name: id\n        description: \"Primary key\"")
+
             model_entry = f"""  - name: {model_name}
-    description: "{layer.capitalize()} model: {model_name.replace('_', ' ').title()}"
+    description: "{layer.capitalize()} model: {display_name}"
     config:
       tags: ['{layer}']
     columns:
-      - name: {row_id_col}
-        description: "Unique surrogate key for this model"
-        data_tests:
-{chr(10).join(row_id_tests) if row_id_tests else '          - not_null'}"""
-            
+{chr(10).join(columns_yaml)}"""
+
             models_yaml.append(model_entry)
-        
+
         return f"""version: 2
 
 # {layer_description}
@@ -2993,64 +3270,80 @@ class DBTProjectGenerator:
 models:
 {chr(10).join(models_yaml)}
 """
-    
-    def _generate_generic_test(self) -> str:
-        """Generate generic test macros."""
-        return """-- Generic test: validates not null when running incrementally
-{% test not_null_if_incremental(model, column_name) %}
+
+    def _generate_generic_test_not_null_incremental(self) -> str:
+        """Generate generic test: not_null_if_incremental."""
+        return """{% test not_null_if_incremental(model, column_name) %}
 
 {% if is_incremental() %}
 select *
 from {{ model }}
 where {{ column_name }} is null
 {% else %}
-select 1 where false  -- Always pass on full refresh
+select 1 where false
 {% endif %}
 
 {% endtest %}
+"""
 
--- Generic test: validates column is positive
-{% test positive_values(model, column_name) %}
+    def _generate_generic_test_positive_values(self) -> str:
+        """Generate generic test: positive_values."""
+        return """{% test positive_values(model, column_name) %}
 
 select *
 from {{ model }}
 where {{ column_name }} < 0
 
 {% endtest %}
+"""
 
--- Generic test: validates date is not in future
-{% test not_in_future(model, column_name) %}
+    def _generate_generic_test_not_in_future(self) -> str:
+        """Generate generic test: not_in_future."""
+        return """{% test not_in_future(model, column_name) %}
 
 select *
 from {{ model }}
-where {{ column_name }} > current_timestamp()
+where cast({{ column_name }} as timestamp_ntz) > current_timestamp()
 
 {% endtest %}
 """
 
-    def _generate_singular_test_positive(self) -> str:
-        """Generate singular test for positive values."""
-        return """-- Singular test: assert all numeric values are positive where expected
-{% set models_to_test = [] %}
+    def _generate_singular_test_positive(self, marts_models: list) -> str:
+        """Generate singular test that checks numeric columns in marts models are non-negative."""
+        checks = []
+        for m in marts_models:
+            cols = self._model_columns.get(m, [])
+            num_cols = self._get_numeric_columns(cols)
+            for nc in num_cols[:2]:
+                checks.append(
+                    f"select\n    '{m}.{nc['name']}' as test_name,\n"
+                    f"    {nc['name']} as tested_value\n"
+                    f"from {{{{ ref('{m}') }}}}\n"
+                    f"where {nc['name']} < 0"
+                )
 
-{% for model in graph.nodes.values() %}
-    {% if model.resource_type == 'model' and 'marts' in model.fqn %}
-        {% do models_to_test.append(model.name) %}
-    {% endif %}
-{% endfor %}
+        if not checks:
+            return "-- No numeric columns found in marts models to test\nselect 1 where false\n"
 
-select 'validation_check' as test_name
-where false  -- Placeholder - customize per model
-"""
+        return "-- Assert numeric columns in marts models are non-negative\n\n" + \
+               "\nunion all\n".join(checks) + "\n"
 
-    def _generate_singular_test_orphans(self) -> str:
-        """Generate singular test for orphaned records."""
-        return """-- Singular test: check for orphaned records in fact tables
--- Customize this test based on your specific foreign key relationships
+    def _generate_singular_test_row_count(self, staging_models: list) -> str:
+        """Generate singular test that validates staging models have rows."""
+        checks = []
+        for m in staging_models[:5]:
+            checks.append(
+                f"select\n    '{m}' as model_name,\n"
+                f"    count(*) as row_count\n"
+                f"from {{{{ ref('{m}') }}}}\n"
+                f"having count(*) = 0"
+            )
 
-select 'orphan_check' as test_name
-where false  -- Placeholder - no orphans found means test passes
-"""
+        if not checks:
+            return "-- No staging models to test\nselect 1 where false\n"
+
+        return "-- Assert staging models are not empty\n\n" + \
+               "\nunion all\n".join(checks) + "\n"
 
     def _generate_time_spine_sql(self) -> str:
         """Generate time spine model for semantic layer."""
@@ -3132,19 +3425,13 @@ models:
 '''
 
     def _generate_semantic_models(self, marts_models: list, schema: dict = None) -> str:
-        """Generate semantic_models.yml for dbt Semantic Layer.
-        
-        Compatible with Fusion engine - includes time dimension referencing time_spine.
-        """
+        """Generate semantic_models.yml using actual columns from model registry."""
         semantic_models = []
         used_entity_names = set()
-        entity_name_map = {}  # Track entity names for metrics
-        
-        for model_name in marts_models[:5]:  # Limit to first 5 models
-            # Create unique entity name from model name
+        entity_name_map = {}
+
+        for model_name in marts_models[:5]:
             base_entity = model_name.replace('fct_', '').replace('agg_', '').replace('dim_', '').replace('rpt_', '')
-            
-            # Ensure unique entity names
             entity_name = base_entity
             counter = 1
             while entity_name in used_entity_names:
@@ -3152,87 +3439,86 @@ models:
                 counter += 1
             used_entity_names.add(entity_name)
             entity_name_map[model_name] = entity_name
-            
+
             display_name = model_name.replace('_', ' ').title()
-            
-            # Semantic model with model-specific entity key
-            row_id_col = f"{model_name}_row_id"
-            semantic_model = f"""  - name: sem_{model_name}
-    description: "Semantic model for {display_name}"
-    model: ref('{model_name}')
-    
-    entities:
-      - name: {entity_name}_entity
-        type: primary
-        expr: {row_id_col}
-    
-    measures:
-      - name: {entity_name}_count
+            cols = self._model_columns.get(model_name, [])
+
+            # Find PK column for entity
+            pk_col = None
+            for c in cols:
+                if c.get('is_primary_key') or c['name'].endswith('_id'):
+                    pk_col = c['name']
+                    break
+            pk_col = pk_col or 'id'
+
+            # Build measures from actual numeric columns
+            num_cols = self._get_numeric_columns(cols)
+            measures = [f"""      - name: {entity_name}_count
         description: "Count of {entity_name} records"
         agg: count
         expr: "1"
-      
-      - name: {entity_name}_unique
-        description: "Distinct count of {entity_name} records"
-        agg: count_distinct
-        expr: {row_id_col}
-"""
+"""]
+            for nc in num_cols[:3]:
+                measures.append(f"""      - name: total_{nc['name']}
+        description: "Sum of {nc['name']}"
+        agg: sum
+        expr: {nc['name']}
+""")
+
+            measures_yaml = "\n".join(measures)
+
+            semantic_model = f"""  - name: sem_{model_name}
+    description: "Semantic model for {display_name}"
+    model: ref('{model_name}')
+
+    entities:
+      - name: {entity_name}_entity
+        type: primary
+        expr: {pk_col}
+
+    measures:
+{measures_yaml}"""
             semantic_models.append(semantic_model)
-        
-        # Note: Metrics removed for Fusion compatibility - measures are defined in semantic models
-        
+
         return f"""version: 2
 
 # Semantic Models for dbt Semantic Layer
 # Compatible with dbt Fusion engine
-# Measures are defined within each semantic model
 
 semantic_models:
 {chr(10).join(semantic_models)}
 """
 
     def _generate_advanced_metrics(self, marts_models: list, entity_name_map: dict = None) -> str:
-        """Generate simple metrics for Fusion compatibility (no type_params)."""
+        """Generate simple metrics for Fusion compatibility using actual measure names."""
         metrics = []
         used_names = set()
-        
+
         if entity_name_map is None:
             entity_name_map = {}
-        
+
         for model_name in marts_models[:3]:
-            # Get entity name from map or derive it
             if model_name in entity_name_map:
                 entity_name = entity_name_map[model_name]
             else:
                 entity_name = model_name.replace('fct_', '').replace('agg_', '').replace('dim_', '').replace('rpt_', '')
-            
-            # Ensure unique metric names
+
             metric_base = entity_name
             counter = 1
             while f"total_{metric_base}" in used_names:
                 metric_base = f"{entity_name}_{counter}"
                 counter += 1
-            
+
             used_names.add(f"total_{metric_base}")
-            used_names.add(f"unique_{metric_base}")
             display_name = metric_base.replace('_', ' ').title()
-            
-            # Fusion-compatible metric format (no type_params)
+
             metrics.append(f"""  - name: total_{metric_base}
     description: "Total count of {metric_base}"
     label: "Total {display_name}"
     type: simple
     measure: {entity_name}_count
 """)
-            
-            # Unique count metric  
-            metrics.append(f"""  - name: unique_{metric_base}
-    description: "Unique count of {metric_base}"
-    label: "Unique {display_name}"
-    type: simple
-    measure: {entity_name}_unique
-""")
-        
+
         if metrics:
             return f"""metrics:
 {chr(10).join(metrics)}"""
@@ -3247,91 +3533,385 @@ semantic_models:
         return "view"
     
     def _generate_staging_sql(self, model_name, entity, schema=None):
-        """Generate staging model SQL with unique surrogate key per model."""
+        """Generate staging model SQL with explicit column selection and light transformations."""
         entity_upper = entity.upper()
-        # Use model-specific column names to avoid duplicates downstream
-        row_id_col = f"{model_name}_row_id"
-        
+        columns = self._get_columns_for_source(entity)
+
+        if not columns:
+            # Fallback if no column metadata available
+            self._model_columns[model_name] = [{"name": "id", "type": "INTEGER"}]
+            return f'''{{{{ config(materialized='view') }}}}
+
+-- Staging model for {entity_upper}
+
+select
+    *
+from {{{{ source('raw_data', '{entity_upper}') }}}}
+'''
+
+        select_lines = []
+        output_cols = []
+        for col in columns:
+            col_upper = col['name'].upper()
+            col_lower = col['name'].lower()
+            ctype = col.get('type', 'VARCHAR').upper()
+
+            if ctype in ('TIMESTAMP', 'TIMESTAMP_NTZ', 'TIMESTAMP_LTZ'):
+                select_lines.append(f"    cast({col_upper} as timestamp_ntz) as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "TIMESTAMP_NTZ",
+                                    "is_primary_key": col.get('is_primary_key', False)})
+            elif ctype == 'DATE':
+                select_lines.append(f"    cast({col_upper} as date) as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "DATE",
+                                    "is_primary_key": col.get('is_primary_key', False)})
+            elif ctype in ('DECIMAL', 'NUMERIC', 'NUMBER'):
+                select_lines.append(f"    cast({col_upper} as decimal(18,2)) as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "DECIMAL",
+                                    "is_primary_key": col.get('is_primary_key', False)})
+            elif ctype == 'INTEGER' or ctype == 'INT':
+                select_lines.append(f"    {col_upper} as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "INTEGER",
+                                    "is_primary_key": col.get('is_primary_key', False)})
+            elif col_lower.endswith('_id'):
+                # ID columns — keep as integer for reliable joins
+                select_lines.append(f"    {col_upper} as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "INTEGER",
+                                    "is_primary_key": col.get('is_primary_key', False)})
+            elif col_lower in ('email',):
+                select_lines.append(f"    lower(trim({col_upper})) as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "VARCHAR"})
+            elif col_lower in ('name', 'first_name', 'last_name', 'product_name'):
+                select_lines.append(f"    trim({col_upper}) as {col_lower}")
+                output_cols.append({"name": col_lower, "type": "VARCHAR"})
+            else:
+                select_lines.append(f"    {col_upper} as {col_lower}")
+                output_cols.append({"name": col_lower, "type": ctype,
+                                    "is_primary_key": col.get('is_primary_key', False)})
+
+        self._model_columns[model_name] = output_cols
+        cols_sql = ",\n".join(select_lines)
+
         return f'''{{{{ config(materialized='view') }}}}
 
 -- Staging model for {entity_upper}
--- Maps directly to raw source table with surrogate key
+-- Renames, casts, and cleans raw source columns
 
-select 
-    *,
-    md5(to_varchar(hash(*))) as {row_id_col}
+select
+{cols_sql}
 from {{{{ source('raw_data', '{entity_upper}') }}}}
 '''
     
     def _generate_intermediate_sql(self, model_name, deps, mat_type):
-        # Use model-specific column name to avoid duplicates
-        row_id_col = f"{model_name}_row_id"
-        
+        """Generate intermediate model SQL with realistic transformations based on verb."""
+        if not deps:
+            deps = [list(self._model_columns.keys())[0]] if self._model_columns else []
+
+        primary_dep = deps[0] if deps else None
+        primary_cols = self._get_model_columns(primary_dep) if primary_dep else []
+
+        # Determine the unique key for incremental models
+        pk_col = None
+        for c in primary_cols:
+            if c.get('is_primary_key') or c['name'].endswith('_id'):
+                pk_col = c['name']
+                break
+
+        ts_col = self._get_timestamp_column(primary_cols)
+
         config = f"materialized='{mat_type}'"
         if mat_type == "incremental":
-            config += f", unique_key='{row_id_col}', incremental_strategy='merge', on_schema_change='append_new_columns'"
-        
-        # Build CTEs from dependencies
-        if not deps:
-            deps = ["source_data"]
-            cte_parts = ["    source_data as (select 1 as placeholder_col)"]
+            uk = pk_col or 'id'
+            config += f", unique_key='{uk}', incremental_strategy='merge', on_schema_change='append_new_columns'"
+
+        # Determine verb from model name to choose transformation pattern
+        verb = None
+        for v in ["cleaned", "filtered", "validated", "enriched", "joined", "aggregated",
+                   "pivoted", "mapped", "combined", "transformed", "calculated", "derived"]:
+            if v in model_name:
+                verb = v
+                break
+
+        # Build CTEs — no incremental WHERE filter. The model still uses
+        # materialized='incremental' with unique_key and merge strategy, so dbt
+        # handles deduplication. Omitting the WHERE clause avoids column mismatch
+        # errors when the target table was created with a different schema.
+        cte_parts = []
+        for dep in deps:
+            dep_cols = self._get_model_columns(dep)
+            col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
+            cte_parts.append(
+                f"    {dep} as (\n        select {col_select}\n"
+                f"        from {{{{ ref('{dep}') }}}}\n    )"
+            )
+
+        ctes_sql = ",\n\n".join(cte_parts) if cte_parts else "    source_data as (select 1 as placeholder_col)"
+
+        # Build SELECT based on verb
+        output_cols = []
+        if verb in ("filtered", "validated", "cleaned") and primary_cols:
+            select_cols = [c['name'] for c in primary_cols]
+            output_cols = list(primary_cols)
+            # Add a WHERE clause for filtering
+            cat_cols = self._get_categorical_columns(primary_cols)
+            where_clause = ""
+            if verb == "filtered" and cat_cols:
+                where_clause = f"\nwhere {cat_cols[0]['name']} is not null"
+            elif verb == "validated" and pk_col:
+                where_clause = f"\nwhere {pk_col} is not null"
+            elif verb == "cleaned":
+                where_clause = ""
+                # Just select cleaned columns
+            select_sql = ",\n    ".join(select_cols)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}{where_clause}"
+
+        elif verb == "enriched" and primary_cols:
+            select_cols = [c['name'] for c in primary_cols]
+            output_cols = list(primary_cols)
+            # Add computed columns
+            enrichments = []
+            if ts_col:
+                enrichments.append(f"datediff('day', {ts_col}, current_timestamp()) as days_since_{ts_col}")
+                output_cols.append({"name": f"days_since_{ts_col}", "type": "INTEGER"})
+            num_cols = self._get_numeric_columns(primary_cols)
+            if num_cols:
+                nc = num_cols[0]['name']
+                enrichments.append(f"case when {nc} > 0 then 'positive' else 'non_positive' end as {nc}_category")
+                output_cols.append({"name": f"{nc}_category", "type": "VARCHAR"})
+            all_cols = select_cols + enrichments
+            select_sql = ",\n    ".join(all_cols)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}"
+
+        elif verb in ("joined",) and len(deps) >= 2:
+            dep_a = deps[0]
+            dep_b = deps[1]
+            a_cols = self._get_model_columns(dep_a)
+            b_cols = self._get_model_columns(dep_b)
+            join_key = self._find_join_key(a_cols, b_cols)
+
+            if join_key and a_cols and b_cols:
+                # Select columns from both, prefixing the second table's non-key cols
+                a_select = [f"{dep_a}.{c['name']}" for c in a_cols]
+                b_select = [f"{dep_b}.{c['name']} as {dep_b.replace('stg_', '').replace('int_', '')}_{c['name']}"
+                            for c in b_cols if c['name'] != join_key]
+                output_cols = list(a_cols)
+                for c in b_cols:
+                    if c['name'] != join_key:
+                        alias = f"{dep_b.replace('stg_', '').replace('int_', '')}_{c['name']}"
+                        output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
+                all_select = a_select + b_select
+                select_sql = ",\n    ".join(all_select)
+                body = f"select\n    {select_sql}\nfrom {dep_a}\nleft join {dep_b}\n    on {dep_a}.{join_key} = {dep_b}.{join_key}"
+            else:
+                # No shared key — fall back to just selecting from primary
+                select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
+                output_cols = list(primary_cols) if primary_cols else []
+                select_sql = ",\n    ".join(select_cols)
+                body = f"select\n    {select_sql}\nfrom {primary_dep}"
+
+        elif verb == "aggregated" and primary_cols:
+            cat_cols = self._get_categorical_columns(primary_cols)
+            num_cols = self._get_numeric_columns(primary_cols)
+            group_col = cat_cols[0]['name'] if cat_cols else (primary_cols[0]['name'] if primary_cols else 'id')
+            agg_exprs = [group_col, f"count(*) as record_count"]
+            output_cols = [{"name": group_col, "type": "VARCHAR"}, {"name": "record_count", "type": "INTEGER"}]
+            for nc in num_cols[:3]:
+                agg_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
+                agg_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
+                output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
+                output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
+            select_sql = ",\n    ".join(agg_exprs)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}\ngroup by {group_col}"
+
+        elif verb in ("pivoted", "mapped") and primary_cols:
+            cat_cols = self._get_categorical_columns(primary_cols)
+            select_cols = [c['name'] for c in primary_cols]
+            output_cols = list(primary_cols)
+            if cat_cols:
+                cc = cat_cols[0]['name']
+                select_cols.append(
+                    f"case\n        when {cc} in ('active', 'completed', 'delivered') then 'success'\n"
+                    f"        when {cc} in ('pending', 'shipped') then 'in_progress'\n"
+                    f"        else 'other'\n    end as {cc}_group"
+                )
+                output_cols.append({"name": f"{cc}_group", "type": "VARCHAR"})
+            select_sql = ",\n    ".join(select_cols)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}"
+
         else:
-            cte_parts = [f"    {dep} as (select * from {{{{ ref('{dep}') }}}})" for dep in deps]
-        
-        refs = ",\n".join(cte_parts)
-        primary_dep = deps[0]
-        
+            # Default: select columns from primary dep
+            select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
+            output_cols = list(primary_cols) if primary_cols else []
+            select_sql = ",\n    ".join(select_cols)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}"
+
+        self._model_columns[model_name] = output_cols
+
         return f'''{{{{ config({config}) }}}}
 
 -- Intermediate transformation: {model_name}
 -- Dependencies: {', '.join(deps)}
-with
-{refs}
 
-select 
-    *,
-    md5(to_varchar(hash(*)) || '{model_name}') as {row_id_col}
-from {primary_dep}
+with
+{ctes_sql}
+
+{body}
 '''
     
     def _generate_marts_sql(self, model_name, deps, mat_type):
-        # Use model-specific column name to avoid duplicates
-        row_id_col = f"{model_name}_row_id"
-        
+        """Generate marts model SQL with prefix-aware patterns (fct/dim/rpt)."""
+        if not deps:
+            self._model_columns[model_name] = [{"name": "id", "type": "INTEGER"}]
+            return f'''{{{{ config(materialized='{mat_type}') }}}}
+
+-- Marts model: {model_name}
+
+select
+    1 as id,
+    current_timestamp() as created_at
+'''
+
+        primary_dep = deps[0]
+        primary_cols = self._get_model_columns(primary_dep)
+        all_deps_comment = ', '.join(deps)
+
+        # Find PK and timestamp for incremental config
+        pk_col = None
+        for c in primary_cols:
+            if c.get('is_primary_key') or c['name'].endswith('_id'):
+                pk_col = c['name']
+                break
+        ts_col = self._get_timestamp_column(primary_cols)
+
         config = f"materialized='{mat_type}'"
         if mat_type == "incremental":
-            config += f", unique_key='{row_id_col}', incremental_strategy='merge', on_schema_change='append_new_columns'"
-        
-        # For marts, reference only the PRIMARY upstream dependency
-        primary_dep = deps[0] if deps else None
-        all_deps_comment = ', '.join(deps) if deps else 'none'
-        
-        if primary_dep:
-            return f'''{{{{ config({config}) }}}}
+            uk = pk_col or 'id'
+            config += f", unique_key='{uk}', incremental_strategy='merge', on_schema_change='append_new_columns'"
 
--- Marts model: {model_name}
--- Primary source: {primary_dep}
--- Full dependency chain: {all_deps_comment}
+        # Build CTEs — no incremental WHERE filter (same rationale as intermediate)
+        cte_parts = []
+        for dep in deps:
+            dep_cols = self._get_model_columns(dep)
+            col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
+            cte_parts.append(
+                f"    {dep} as (\n        select {col_select}\n"
+                f"        from {{{{ ref('{dep}') }}}}\n    )"
+            )
+        ctes_sql = ",\n\n".join(cte_parts)
 
-with source_data as (
-    select * from {{{{ ref('{primary_dep}') }}}}
-)
+        # Determine model type from prefix
+        output_cols = []
+        if model_name.startswith("fct_"):
+            # Fact table: select keys, measures, timestamps from primary; join if multiple deps
+            select_exprs = []
+            id_cols = [c for c in primary_cols if c['name'].endswith('_id')]
+            num_cols = self._get_numeric_columns(primary_cols)
+            ts_cols = [c for c in primary_cols if c.get('type', '').upper() in
+                       ('TIMESTAMP', 'TIMESTAMP_NTZ', 'DATE') or c['name'] in
+                       ('created_at', 'order_date', 'transaction_date', 'event_timestamp', 'payment_date')]
 
-select 
-    *,
-    md5(to_varchar(hash(*)) || '{model_name}') as {row_id_col}
-from source_data
-'''
+            for c in id_cols:
+                select_exprs.append(f"{primary_dep}.{c['name']}")
+                output_cols.append(c)
+            for c in ts_cols:
+                if c not in id_cols:
+                    select_exprs.append(f"{primary_dep}.{c['name']}")
+                    if c not in output_cols:
+                        output_cols.append(c)
+            for c in num_cols:
+                if c not in id_cols and c not in ts_cols:
+                    select_exprs.append(f"{primary_dep}.{c['name']}")
+                    if c not in output_cols:
+                        output_cols.append(c)
+
+            # If we have a second dep, try to join and pull extra columns
+            join_clause = ""
+            if len(deps) >= 2:
+                dep_b = deps[1]
+                b_cols = self._get_model_columns(dep_b)
+                join_key = self._find_join_key(primary_cols, b_cols)
+                if join_key and b_cols:
+                    join_clause = f"\nleft join {dep_b}\n    on {primary_dep}.{join_key} = {dep_b}.{join_key}"
+                    for c in b_cols[:3]:
+                        if c['name'] != join_key and c['name'] not in [oc['name'] for oc in output_cols]:
+                            alias = c['name']
+                            select_exprs.append(f"{dep_b}.{alias}")
+                            output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
+
+            if not select_exprs:
+                select_exprs = [f"{primary_dep}.*"]
+                output_cols = list(primary_cols)
+
+            select_sql = ",\n    ".join(select_exprs)
+            body = f"select\n    {select_sql}\nfrom {primary_dep}{join_clause}"
+
+        elif model_name.startswith("dim_"):
+            # Dimension table: select descriptive attributes, deduplicate if possible
+            select_cols = [c['name'] for c in primary_cols]
+            output_cols = list(primary_cols)
+
+            if pk_col and ts_col and len(primary_cols) > 2:
+                # SCD Type 1: keep latest row per PK
+                inner_select = ",\n        ".join(select_cols)
+                body = (
+                    f"select\n    {', '.join(select_cols)}\n"
+                    f"from (\n"
+                    f"    select\n        {inner_select},\n"
+                    f"        row_number() over (partition by {pk_col} order by {ts_col} desc) as _rn\n"
+                    f"    from {primary_dep}\n"
+                    f")\nwhere _rn = 1"
+                )
+            else:
+                select_sql = ",\n    ".join(select_cols)
+                body = f"select distinct\n    {select_sql}\nfrom {primary_dep}"
+
         else:
-            return f'''{{{{ config({config}) }}}}
+            # Report/agg/summary/kpi: aggregate by time and/or category
+            cat_cols = self._get_categorical_columns(primary_cols)
+            num_cols = self._get_numeric_columns(primary_cols)
+
+            group_cols = []
+            select_exprs = []
+
+            if ts_col:
+                select_exprs.append(f"date_trunc('day', {ts_col}) as report_date")
+                group_cols.append(f"date_trunc('day', {ts_col})")
+                output_cols.append({"name": "report_date", "type": "DATE"})
+            if cat_cols:
+                cc = cat_cols[0]['name']
+                select_exprs.append(cc)
+                group_cols.append(cc)
+                output_cols.append({"name": cc, "type": "VARCHAR"})
+
+            select_exprs.append("count(*) as record_count")
+            output_cols.append({"name": "record_count", "type": "INTEGER"})
+            for nc in num_cols[:3]:
+                select_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
+                select_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
+                output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
+                output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
+
+            if not group_cols:
+                # No grouping possible — just select from primary
+                select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
+                output_cols = list(primary_cols)
+                select_sql = ",\n    ".join(select_cols)
+                body = f"select\n    {select_sql}\nfrom {primary_dep}"
+            else:
+                select_sql = ",\n    ".join(select_exprs)
+                group_sql = ", ".join(group_cols)
+                body = f"select\n    {select_sql}\nfrom {primary_dep}\ngroup by {group_sql}"
+
+        self._model_columns[model_name] = output_cols
+
+        return f'''{{{{ config({config}) }}}}
 
 -- Marts model: {model_name}
--- No upstream dependencies
+-- Dependencies: {all_deps_comment}
 
-select 
-    1 as id,
-    current_timestamp() as created_at,
-    md5('{model_name}' || to_varchar(current_timestamp())) as {row_id_col}
+with
+{ctes_sql}
+
+{body}
 '''
     
     def _generate_sources_yml(self, schema=None):
@@ -4095,7 +4675,7 @@ def render_pipeline_config():
                 options=["not_null", "unique"],
                 default=["not_null", "unique"],
                 key="config_test_types",
-                help="Tests are applied to surrogate key columns (stg_row_id, int_row_id, mart_row_id) at each layer."
+                help="Tests are applied to actual model columns (primary keys, foreign keys, timestamps) at each layer."
             )
     
     row_count_map = {"1K": 1000, "10K": 10000, "100K": 100000, "1M": 1000000, "10M": 10000000, "100M": 100000000, "1B": 1000000000}
