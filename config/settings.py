@@ -49,16 +49,11 @@ class SnowflakeSettings:
 @dataclass
 class DataGeneratorSettings:
     """Synthetic data generation settings."""
-    openai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
-    nvidia_api_key: str = field(default_factory=lambda: os.getenv("NVIDIA_API_KEY", ""))
-    
+    anthropic_api_key: str = field(default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", ""))
+
     # Generation limits
     max_rows_per_table: int = 100000
     max_preview_rows: int = 1000
-    
-    # Data Designer settings
-    use_data_designer: bool = True
-    default_model_alias: str = "openai-text"
 
 
 @dataclass
@@ -89,8 +84,7 @@ class AppSettings:
                 "database": self.snowflake.database,
             },
             "data_generator": {
-                "has_openai_key": bool(self.data_generator.openai_api_key),
-                "has_nvidia_key": bool(self.data_generator.nvidia_api_key),
+                "has_anthropic_key": bool(self.data_generator.anthropic_api_key),
             },
         }
 
