@@ -8,10 +8,8 @@ plotly>=5.18.0
 requests>=2.31.0
 pydantic>=2.5.0
 
-# Synthetic Data Generation
-data-designer>=0.1.5  # NVIDIA NeMo Data Designer (optional, AI-powered)
-faker>=22.0.0          # Faker for fast local data generation
-openai>=1.3.0          # OpenAI for schema generation
+# Synthetic Data Generation (Claude API)
+anthropic>=0.40.0
 
 # Snowflake Integration
 snowflake-connector-python>=3.5.0

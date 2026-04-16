@@ -25,941 +25,20 @@ try:
 except ImportError:
     SNOWFLAKE_CONNECTOR_AVAILABLE = False
 
-try:
-    from data_designer.essentials import (
-        DataDesigner,
-        DataDesignerConfigBuilder,
-        LLMTextColumnConfig,
-        SamplerColumnConfig,
-        SamplerType,
-        CategorySamplerParams,
-        PersonSamplerParams,
-        UniformSamplerParams,  # For integers and floats
-        DatetimeSamplerParams,  # Note: lowercase 't'
-    )
-    DATA_DESIGNER_AVAILABLE = True
-except ImportError as e:
-    DATA_DESIGNER_AVAILABLE = False
-    print(f"Data Designer import error: {e}")
+from modules.data_generator import SyntheticDataGenerator
 
 
-# =============================================================================
-# SYNTHETIC DATA GENERATOR (Using NVIDIA Data Designer + OpenAI)
-# =============================================================================
+# NOTE: SyntheticDataGenerator is imported from modules.data_generator
+# (see import at top of file)
 
-class SyntheticDataGenerator:
-    """Generate synthetic data using NVIDIA Data Designer with OpenAI for schema generation."""
-    
-    def __init__(self, openai_api_key: str = None, nvidia_api_key: str = None):
-        self.openai_api_key = openai_api_key
-        self.nvidia_api_key = nvidia_api_key or os.environ.get("NVIDIA_API_KEY")
-        
-        # Set up OpenAI for schema generation
-        if openai_api_key:
-            self.openai_headers = {
-                "Authorization": f"Bearer {openai_api_key}",
-                "Content-Type": "application/json"
-            }
-            # Data Designer can use OpenAI - set the env var
-            os.environ["OPENAI_API_KEY"] = openai_api_key
-        
-        # Set NVIDIA API key for Data Designer (if provided)
-        if self.nvidia_api_key:
-            os.environ["NVIDIA_API_KEY"] = self.nvidia_api_key
-    
-    def generate_schema(self, customer_description: str, num_sources: int, pipeline_config: dict) -> dict:
-        """Generate a data schema based on customer description using OpenAI."""
-        if not self.openai_api_key:
-            return self._get_default_schema(num_sources)
-        
-        prompt = f"""You are a senior data architect designing a data warehouse schema for a dbt (data build tool) project.
 
-## Customer Context
-{customer_description}
+class _LegacyDDLGenerator:
+    """Retained DDL generation logic used by SnowflakeDataLoader.
 
-## Task
-Generate a realistic raw data schema that would be found in this company's source systems. This schema will be used to:
-1. Generate synthetic test data
-2. Build a dbt project with staging, intermediate, and marts models
-3. Demonstrate data transformation pipelines
+    The schema-to-DDL conversion was part of the old inline SyntheticDataGenerator
+    but is only needed for Snowflake table creation, not for data generation.
+    """
 
-## Requirements
-- Generate exactly {num_sources} source tables
-- Each table should have 5-8 columns (keep it focused and realistic)
-- Use snake_case for all table and column names (e.g., ticket_sales, game_id)
-- Every table MUST have a primary key column ending in "_id" (e.g., game_id, team_id)
-- Include foreign key relationships between tables where logical
-- Use realistic column names specific to this business domain
-
-## Column Types (Snowflake-compatible)
-- INTEGER: For ALL columns ending in "_id" (identifiers must always be INTEGER for reliable joins)
-- VARCHAR: For names, descriptions, statuses, categories, emails, addresses
-- DECIMAL: For money, percentages, measurements
-- TIMESTAMP: For dates and times
-- BOOLEAN: For flags and binary states
-- DATE: For date-only fields
-
-## CRITICAL: All columns whose name ends in "_id" MUST use type "INTEGER", not "VARCHAR".
-
-## Response Format
-Return ONLY valid JSON with this exact structure (no markdown, no explanation):
-{{
-    "sources": [
-        {{
-            "name": "table_name_lowercase",
-            "description": "What this table stores",
-            "columns": [
-                {{"name": "column_name", "type": "INTEGER|VARCHAR|DECIMAL|TIMESTAMP|BOOLEAN|DATE", "description": "What this column contains", "is_primary_key": true}}
-            ]
-        }}
-    ],
-    "relationships": [
-        {{"from_table": "child_table", "from_column": "foreign_key_id", "to_table": "parent_table", "to_column": "primary_key_id"}}
-    ]
-}}"""
-
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=self.openai_headers,
-                json={
-                    "model": "gpt-5.2",  # Latest GPT-5.2 model (released Dec 2025)
-                    "messages": [
-                        {"role": "system", "content": "You are a data architect. Return only valid JSON, no markdown formatting."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.5,  # Lower temperature for more consistent structured output
-                    "max_completion_tokens": 4000  # GPT-5.2 uses max_completion_tokens instead of max_tokens
-                },
-                timeout=120
-            )
-            
-            if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"]
-                content = content.strip()
-                if content.startswith("```"):
-                    content = re.sub(r'^```(?:json)?\n?', '', content)
-                    content = re.sub(r'\n?```$', '', content)
-                schema = json.loads(content)
-                # Force all _id columns to INTEGER for reliable joins
-                for source in schema.get("sources", []):
-                    for col in source.get("columns", []):
-                        if col.get("name", "").lower().endswith("_id") or col.get("name", "").lower() == "id":
-                            col["type"] = "INTEGER"
-                return schema
-            else:
-                return {"error": f"API Error: {response.status_code} - {response.text[:200]}"}
-        except requests.exceptions.Timeout:
-            # If OpenAI times out, fall back to default schema
-            return self._get_default_schema(num_sources)
-        except Exception as e:
-            return {"error": str(e)}
-    
-    def _get_default_schema(self, num_sources: int) -> dict:
-        """Return a default e-commerce schema if OpenAI times out."""
-        default_tables = [
-            {
-                "name": "customers",
-                "description": "Customer master data",
-                "columns": [
-                    {"name": "customer_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique customer identifier"},
-                    {"name": "first_name", "type": "VARCHAR", "description": "Customer first name"},
-                    {"name": "last_name", "type": "VARCHAR", "description": "Customer last name"},
-                    {"name": "email", "type": "VARCHAR", "description": "Customer email address"},
-                    {"name": "created_at", "type": "TIMESTAMP", "description": "Account creation timestamp"},
-                ]
-            },
-            {
-                "name": "orders",
-                "description": "Order transactions",
-                "columns": [
-                    {"name": "order_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique order identifier"},
-                    {"name": "customer_id", "type": "INTEGER", "description": "Reference to customer"},
-                    {"name": "order_date", "type": "TIMESTAMP", "description": "Order placement date"},
-                    {"name": "total_amount", "type": "DECIMAL", "description": "Total order value"},
-                    {"name": "status", "type": "VARCHAR", "description": "Order status"},
-                ]
-            },
-            {
-                "name": "products",
-                "description": "Product catalog",
-                "columns": [
-                    {"name": "product_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique product identifier"},
-                    {"name": "product_name", "type": "VARCHAR", "description": "Product name"},
-                    {"name": "category", "type": "VARCHAR", "description": "Product category"},
-                    {"name": "price", "type": "DECIMAL", "description": "Product price"},
-                    {"name": "created_at", "type": "TIMESTAMP", "description": "Product creation date"},
-                ]
-            },
-            {
-                "name": "order_items",
-                "description": "Line items for each order",
-                "columns": [
-                    {"name": "item_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique line item identifier"},
-                    {"name": "order_id", "type": "INTEGER", "description": "Reference to order"},
-                    {"name": "product_id", "type": "INTEGER", "description": "Reference to product"},
-                    {"name": "quantity", "type": "INTEGER", "description": "Quantity ordered"},
-                    {"name": "unit_price", "type": "DECIMAL", "description": "Price per unit"},
-                ]
-            },
-            {
-                "name": "payments",
-                "description": "Payment records",
-                "columns": [
-                    {"name": "payment_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique payment identifier"},
-                    {"name": "order_id", "type": "INTEGER", "description": "Reference to order"},
-                    {"name": "amount", "type": "DECIMAL", "description": "Payment amount"},
-                    {"name": "payment_method", "type": "VARCHAR", "description": "Payment method used"},
-                    {"name": "payment_date", "type": "TIMESTAMP", "description": "Payment timestamp"},
-                ]
-            },
-            {
-                "name": "inventory",
-                "description": "Product inventory levels",
-                "columns": [
-                    {"name": "inventory_id", "type": "INTEGER", "is_primary_key": True, "description": "Unique inventory record"},
-                    {"name": "product_id", "type": "INTEGER", "description": "Reference to product"},
-                    {"name": "quantity_on_hand", "type": "INTEGER", "description": "Current stock level"},
-                    {"name": "warehouse_id", "type": "INTEGER", "description": "Warehouse location"},
-                    {"name": "last_updated", "type": "TIMESTAMP", "description": "Last update timestamp"},
-                ]
-            },
-        ]
-        return {"sources": default_tables[:num_sources], "relationships": []}
-    
-    def generate_schema_and_data(self, customer_description: str, num_sources: int, 
-                                    rows_per_table: int = 1000, pipeline_config: dict = None,
-                                    sample_ddl: str = None, num_columns: int = 6) -> dict:
-        """Generate schema using GPT-5-mini (fast), then data using Data Designer (scalable).
-        
-        Two-step approach for speed:
-        1. GPT-5-mini generates intelligent schema based on business description
-        2. Data Designer generates the actual data rows (fast & scalable)
-        """
-        if not self.openai_api_key:
-            return {"error": "OpenAI API key required. Please configure it in the sidebar."}
-        
-        # =====================================================================
-        # STEP 1: Generate schema with GPT-5-mini (fast - schema only, no data)
-        # =====================================================================
-        st.info(f"🤖 **Step 1/2:** GPT generating schema ({num_sources} tables, {num_columns} columns each)...")
-        
-        schema = self._generate_schema_with_gpt(customer_description, num_sources, sample_ddl, num_columns)
-        
-        if isinstance(schema, dict) and "error" in schema:
-            return schema
-        
-        if not schema.get("sources"):
-            return {"error": "GPT returned an empty schema. Please try again."}
-        
-        # Sanitize column names in schema to avoid Snowflake reserved keyword conflicts
-        schema = self._sanitize_schema_columns(schema)
-        
-        st.success(f"✅ Schema generated: {len(schema['sources'])} tables")
-        
-        # =====================================================================
-        # STEP 2: Generate data with Data Designer (LLM-based, scalable)
-        # =====================================================================
-        st.info(f"⚡ **Step 2/2:** Generating {rows_per_table:,} rows per table using LLM-based Data Designer...")
-        
-        if not DATA_DESIGNER_AVAILABLE:
-            return {"error": "Data Designer is required but not installed. Please install with: pip install data-designer"}
-        
-        dataframes = self._generate_data_with_designer(schema, rows_per_table)
-        
-        if isinstance(dataframes, dict) and "error" in dataframes:
-            return dataframes
-
-        # Reconcile schema with actual DataFrame columns to ensure dbt models
-        # reference only columns that actually exist in the generated data
-        schema = self._reconcile_schema_with_dataframes(schema, dataframes)
-
-        total_rows = sum(len(df) for df in dataframes.values())
-        st.success(f"✅ Generated {total_rows:,} total rows across {len(dataframes)} tables!")
-
-        return {"dataframes": dataframes, "schema": schema}
-
-    def _reconcile_schema_with_dataframes(self, schema: dict, dataframes: dict) -> dict:
-        """Update schema to match actual DataFrame columns.
-
-        The GPT-generated schema may differ from what the Data Designer actually
-        produced. This ensures the schema (used for DDL and dbt project generation)
-        reflects the real columns in the generated data.
-        """
-        reconciled_sources = []
-        df_lookup = {k.lower(): (k, v) for k, v in dataframes.items()}
-
-        for source in schema.get("sources", []):
-            source_name = source["name"]
-            key = source_name.lower()
-
-            if key not in df_lookup:
-                # Table wasn't generated — keep original schema entry
-                reconciled_sources.append(source)
-                continue
-
-            _, df = df_lookup[key]
-            actual_cols = list(df.columns)
-
-            # Build a lookup of the original schema columns for metadata
-            original_col_map = {}
-            for col in source.get("columns", []):
-                # Match by sanitized uppercase name
-                sanitized = self._sanitize_col_name(col["name"]).upper()
-                original_col_map[sanitized] = col
-
-            # Build reconciled columns from actual DataFrame columns
-            reconciled_columns = []
-            for col_name in actual_cols:
-                col_upper = col_name.upper()
-                if col_upper in original_col_map:
-                    # Keep original metadata (type, description, is_primary_key, sample_values)
-                    orig = original_col_map[col_upper].copy()
-                    orig["name"] = col_upper  # Ensure uppercase
-                    reconciled_columns.append(orig)
-                else:
-                    # Column exists in data but not in schema — infer type from DataFrame
-                    dtype = str(df[col_name].dtype)
-                    if "int" in dtype:
-                        col_type = "INTEGER"
-                    elif "float" in dtype:
-                        col_type = "DECIMAL"
-                    elif "datetime" in dtype:
-                        col_type = "TIMESTAMP"
-                    elif "bool" in dtype:
-                        col_type = "BOOLEAN"
-                    else:
-                        col_type = "VARCHAR"
-
-                    is_pk = col_upper.endswith("_ID") and len(reconciled_columns) == 0
-                    reconciled_columns.append({
-                        "name": col_upper,
-                        "type": col_type,
-                        "description": col_upper.replace("_", " ").title(),
-                        "is_primary_key": is_pk,
-                    })
-
-            reconciled_source = {
-                "name": source_name,
-                "description": source.get("description", ""),
-                "columns": reconciled_columns,
-            }
-            reconciled_sources.append(reconciled_source)
-
-        return {
-            "sources": reconciled_sources,
-            "relationships": schema.get("relationships", []),
-        }
-
-    def _generate_schema_with_gpt(self, customer_description: str, num_sources: int, sample_ddl: str = None, num_columns: int = 6) -> dict:
-        """Use gpt-5-mini (fast) to generate RAW SOURCE schema with realistic sample values."""
-        
-        # Enhanced prompt - request sample_values for ALL VARCHAR columns for realistic data
-        prompt = f"""Generate {num_sources} raw source tables for this business: {customer_description}
-
-REQUIREMENTS:
-- Exactly {num_sources} tables with {num_columns} columns each
-- Use operational table names (customers, orders, events, etc.) - NO dim_/fact_ prefixes
-- First column must be a primary key ending in _id (INTEGER type)
-- ALL columns ending in _id MUST use INTEGER type (for reliable joins across tables)
-- Use Snowflake types: VARCHAR, INTEGER, DECIMAL, TIMESTAMP, DATE, BOOLEAN
-
-CRITICAL - Sample Values:
-- For EVERY VARCHAR column, include "sample_values" with 4-6 REALISTIC values specific to this business
-- Values must be contextually relevant to "{customer_description}"
-- NO generic values like "Type_1", "Value_A", "Option_1"
-- ALL values MUST use only plain ASCII characters (a-z, A-Z, 0-9, basic punctuation). NO emoji, NO unicode symbols, NO special characters outside standard ASCII
-- For email columns, use only standard domains like example.com, company.com, etc.
-- Examples of GOOD sample_values:
-  - For a recognition platform: ["peer_recognition", "manager_award", "milestone", "spot_bonus"]
-  - For an e-commerce site: ["shipped", "delivered", "processing", "returned", "cancelled"]
-  - For a streaming service: ["movie", "series", "documentary", "live_event"]
-  - For email: ["john.smith@example.com", "jane.doe@company.com"]
-
-JSON format (return ONLY valid JSON, no markdown):
-{{"sources":[
-  {{"name":"table_name","description":"What this table stores","columns":[
-    {{"name":"column_id","type":"INTEGER","is_primary_key":true}},
-    {{"name":"column_name","type":"VARCHAR","sample_values":["realistic","business","specific","values"]}}
-  ]}}
-]}}"""
-
-        try:
-            st.info(f"🤖 Generating schema with GPT-5-mini ({num_sources} source tables)...")
-            
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers=self.openai_headers,
-                json={
-                    "model": "gpt-5-mini",  # Fast model
-                    "messages": [
-                        {"role": "system", "content": "Return only valid JSON. No markdown."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "max_completion_tokens": 64000  # Large limit for big schemas
-                    # Note: gpt-5-mini only supports temperature=1 (default)
-                },
-                timeout=600  # 10 minutes for large requests
-            )
-            
-            if response.status_code != 200:
-                return {"error": f"API Error: {response.status_code} - {response.text[:200]}"}
-            
-            response_json = response.json()
-            choices = response_json.get("choices", [])
-            
-            if not choices:
-                return {"error": "Empty response from GPT"}
-            
-            # Check if response was truncated
-            finish_reason = choices[0].get("finish_reason", "")
-            if finish_reason == "length":
-                st.warning("⚠️ Response was truncated. Reducing number of tables...")
-                # Response was cut off - this is likely the issue
-            
-            content = choices[0].get("message", {}).get("content", "")
-            content = content.strip()
-            
-            if not content:
-                return {"error": "Empty content from GPT"}
-            
-            # Clean markdown if present
-            if content.startswith("```"):
-                content = re.sub(r'^```(?:json)?\n?', '', content)
-                content = re.sub(r'\n?```$', '', content)
-            
-            # Try to fix common JSON issues
-            # Remove trailing commas before ] or }
-            content = re.sub(r',(\s*[}\]])', r'\1', content)
-            
-            try:
-                result = json.loads(content)
-            except json.JSONDecodeError as e:
-                # If JSON parsing fails, try to extract what we can
-                st.warning(f"⚠️ JSON parse error at position {e.pos}. Attempting to fix...")
-                
-                # Try truncating at the error position and closing brackets
-                truncated = content[:e.pos].rstrip().rstrip(',')
-                # Count open brackets and close them
-                open_brackets = truncated.count('[') - truncated.count(']')
-                open_braces = truncated.count('{') - truncated.count('}')
-                truncated += ']' * open_brackets + '}' * open_braces
-                
-                try:
-                    result = json.loads(truncated)
-                    st.info(f"✅ Recovered {len(result.get('sources', []))} tables from partial response")
-                except:
-                    return {"error": f"Failed to parse GPT response. The response may have been truncated. Try reducing the number of source tables."}
-            
-            # Sanitize sample_values and normalize _id columns to INTEGER
-            for source in result.get('sources', []):
-                for col in source.get('columns', []):
-                    # Force all _id columns to INTEGER for reliable joins
-                    col_name = col.get("name", "").lower()
-                    if col_name.endswith("_id") or col_name == "id":
-                        col["type"] = "INTEGER"
-                    
-                    if 'sample_values' in col and isinstance(col['sample_values'], list):
-                        sanitized = []
-                        for v in col['sample_values']:
-                            s = str(v)
-                            s = s.encode('ascii', 'ignore').decode('ascii').strip()
-                            if s:
-                                sanitized.append(s)
-                        col['sample_values'] = sanitized if sanitized else None
-            
-            # Validate and enforce exact number of sources
-            actual_sources = len(result.get('sources', []))
-            if actual_sources > num_sources:
-                st.warning(f"⚠️ GPT generated {actual_sources} tables but only {num_sources} requested. Trimming to {num_sources}.")
-                result['sources'] = result['sources'][:num_sources]
-            elif actual_sources < num_sources:
-                st.warning(f"⚠️ GPT only generated {actual_sources} tables (requested {num_sources}). Proceeding with {actual_sources}.")
-            
-            final_count = len(result.get('sources', []))
-            st.success(f"✅ Generated schema with {final_count} tables")
-            return result
-            
-        except requests.exceptions.Timeout:
-            return {"error": "Request timed out. Please try again or reduce the number of source tables."}
-        except json.JSONDecodeError as e:
-            return {"error": f"Failed to parse response: {str(e)}. Try reducing the number of source tables."}
-        except Exception as e:
-            return {"error": f"Error: {str(e)}"}
-    
-    def _generate_data_with_designer(self, schema: dict, rows_per_table: int) -> dict:
-        """Use Data Designer (LLM-based) for data generation with batching for large requests."""
-        dataframes = {}
-        num_sources = len(schema.get("sources", []))
-        
-        # For very large row counts, use batching to avoid memory issues
-        BATCH_SIZE = 50000  # Generate in batches of 50K rows
-        
-        try:
-            data_designer = DataDesigner()
-            progress_bar = st.progress(0)
-            
-            for idx, source in enumerate(schema.get("sources", [])):
-                table_name = source["name"]
-                
-                # Determine if we need batching
-                if rows_per_table > BATCH_SIZE:
-                    st.info(f"  📊 Large table ({rows_per_table:,} rows) - generating in batches...")
-                    df = self._generate_table_batched(data_designer, source, rows_per_table, BATCH_SIZE)
-                else:
-                    df = self._generate_single_table(data_designer, source, rows_per_table)
-                
-                if df is None:
-                    return {"error": f"Failed to generate data for table {table_name}"}
-                
-                dataframes[table_name] = df
-                progress = (idx + 1) / num_sources
-                progress_bar.progress(progress)
-                st.success(f"  ✅ {table_name}: {len(df):,} rows ({idx + 1}/{num_sources})")
-            
-            progress_bar.empty()
-
-            # Fix FK referential integrity — replace FK values in child tables
-            # with actual PK values sampled from parent tables
-            dataframes = self._fix_fk_referential_integrity(dataframes, schema)
-
-        except Exception as e:
-            return {"error": f"Data Designer error: {str(e)}"}
-
-        return dataframes
-    
-    def _fix_fk_referential_integrity(self, dataframes: dict, schema: dict) -> dict:
-        """Post-process generated DataFrames so FK columns reference actual PK values.
-
-        Uses schema['relationships'] to identify FK→PK mappings, then replaces
-        FK column values in child tables with values sampled from the parent table's
-        PK column. Also ensures PK columns have unique sequential integer values.
-        """
-        import numpy as np
-
-        # Build case-insensitive lookup for dataframes
-        df_lookup = {k.upper(): k for k in dataframes}
-
-        # First pass: ensure all PK columns have unique sequential integer IDs
-        # and build a map of PK column name → (table_key, column_name) for FK inference
-        pk_column_map = {}  # e.g. {"CUSTOMER_ID": ("CUSTOMERS", "CUSTOMER_ID")}
-        for source in schema.get("sources", []):
-            table_name = source["name"]
-            df_key = df_lookup.get(table_name.upper())
-            if not df_key:
-                continue
-            df = dataframes[df_key]
-            for col in source.get("columns", []):
-                if col.get("is_primary_key"):
-                    col_name = col["name"]
-                    matching_cols = [c for c in df.columns if c.upper() == col_name.upper()]
-                    if matching_cols:
-                        actual_col = matching_cols[0]
-                        df[actual_col] = range(1, len(df) + 1)
-                        pk_column_map[col_name.upper()] = (df_key, actual_col)
-
-        # Build relationships list — use explicit ones from schema, plus infer
-        # from shared _id column names (FK in child table matches PK name in parent)
-        relationships = list(schema.get("relationships", []))
-        explicit_fks = {(r["from_table"].upper(), r["from_column"].upper()) for r in relationships}
-
-        for source in schema.get("sources", []):
-            table_name = source["name"]
-            df_key = df_lookup.get(table_name.upper())
-            if not df_key:
-                continue
-            for col in source.get("columns", []):
-                col_upper = col["name"].upper()
-                # Skip if this is the table's own PK
-                if col.get("is_primary_key"):
-                    continue
-                # If this _id column matches a PK column name from another table
-                if col_upper in pk_column_map and (table_name.upper(), col_upper) not in explicit_fks:
-                    parent_key, parent_col = pk_column_map[col_upper]
-                    if parent_key != df_key:  # Don't self-reference
-                        relationships.append({
-                            "from_table": table_name,
-                            "from_column": col["name"],
-                            "to_table": parent_key,
-                            "to_column": parent_col
-                        })
-
-        # Second pass: replace FK values with sampled PK values from parent tables
-        for rel in relationships:
-            from_table = rel.get("from_table", "").upper()
-            from_column = rel.get("from_column", "").upper()
-            to_table = rel.get("to_table", "").upper()
-            to_column = rel.get("to_column", "").upper()
-
-            child_key = df_lookup.get(from_table)
-            parent_key = df_lookup.get(to_table)
-
-            if not child_key or not parent_key:
-                continue
-
-            child_df = dataframes[child_key]
-            parent_df = dataframes[parent_key]
-
-            # Find matching columns (case-insensitive)
-            child_fk_cols = [c for c in child_df.columns if c.upper() == from_column]
-            parent_pk_cols = [c for c in parent_df.columns if c.upper() == to_column]
-
-            if not child_fk_cols or not parent_pk_cols:
-                continue
-
-            child_fk_col = child_fk_cols[0]
-            parent_pk_col = parent_pk_cols[0]
-
-            # Sample FK values from actual parent PK values
-            parent_pk_values = parent_df[parent_pk_col].dropna().values
-            if len(parent_pk_values) == 0:
-                continue
-
-            sampled_fks = np.random.choice(parent_pk_values, size=len(child_df), replace=True)
-            child_df[child_fk_col] = sampled_fks
-
-        return dataframes
-
-    def _generate_single_table(self, data_designer, source: dict, num_rows: int) -> pd.DataFrame:
-        """Generate a single table using Data Designer."""
-        config_builder = DataDesignerConfigBuilder()
-        
-        for col in source.get("columns", []):
-            col_name = col["name"]
-            safe_col_name = self._sanitize_col_name(col_name)
-            col_type = col.get("type", "VARCHAR").upper()
-            sampler_config = self._get_sampler_config_for_column(safe_col_name, col_type, col)
-            config_builder.add_column(sampler_config)
-        
-        result = data_designer.create(
-            config_builder=config_builder,
-            num_records=num_rows,
-            dataset_name=source["name"]
-        )
-        df = result.load_dataset()
-        
-        # Ensure column names are sanitized
-        df.columns = [self._sanitize_col_name(c) for c in df.columns]
-        return df
-    
-    def _generate_table_batched(self, data_designer, source: dict, total_rows: int, batch_size: int) -> pd.DataFrame:
-        """Generate a large table in batches using Data Designer."""
-        batches = []
-        rows_generated = 0
-        batch_num = 0
-        
-        while rows_generated < total_rows:
-            batch_num += 1
-            rows_this_batch = min(batch_size, total_rows - rows_generated)
-            
-            st.text(f"    Batch {batch_num}: generating {rows_this_batch:,} rows...")
-            
-            config_builder = DataDesignerConfigBuilder()
-            
-            for col in source.get("columns", []):
-                col_name = col["name"]
-                safe_col_name = self._sanitize_col_name(col_name)
-                col_type = col.get("type", "VARCHAR").upper()
-                sampler_config = self._get_sampler_config_for_column(safe_col_name, col_type, col)
-                config_builder.add_column(sampler_config)
-            
-            result = data_designer.create(
-                config_builder=config_builder,
-                num_records=rows_this_batch,
-                dataset_name=f"{source['name']}_batch{batch_num}"
-            )
-            batch_df = result.load_dataset()
-            batch_df.columns = [self._sanitize_col_name(c) for c in batch_df.columns]
-            
-            # Adjust primary key column to be unique across batches
-            for col in source.get("columns", []):
-                if col.get("is_primary_key") or "_id" in col["name"].lower():
-                    pk_col = self._sanitize_col_name(col["name"])
-                    if pk_col in batch_df.columns:
-                        batch_df[pk_col] = batch_df[pk_col] + rows_generated
-            
-            batches.append(batch_df)
-            rows_generated += rows_this_batch
-        
-        # Concatenate all batches
-        final_df = pd.concat(batches, ignore_index=True)
-        return final_df
-    
-    # Reserved keywords that need sanitization
-    # Comprehensive Snowflake reserved keywords - must match SnowflakeDataLoader
-    RESERVED_KEYWORDS = {
-        'TRIGGER', 'ORDER', 'TABLE', 'INDEX', 'SELECT', 'INSERT', 'UPDATE', 'DELETE',
-        'CREATE', 'DROP', 'ALTER', 'FROM', 'WHERE', 'JOIN', 'ON', 'AND', 'OR', 'NOT',
-        'NULL', 'TRUE', 'FALSE', 'GROUP', 'BY', 'HAVING', 'UNION', 'ALL', 'AS', 'IN',
-        'BETWEEN', 'LIKE', 'IS', 'EXISTS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
-        'PRIMARY', 'KEY', 'FOREIGN', 'REFERENCES', 'UNIQUE', 'CHECK', 'DEFAULT',
-        'CONSTRAINT', 'CASCADE', 'SET', 'VALUES', 'INTO', 'VIEW', 'PROCEDURE',
-        'FUNCTION', 'SCHEMA', 'DATABASE', 'USER', 'ROLE', 'GRANT', 'REVOKE',
-        'COMMENT', 'COLUMN', 'ROW', 'ROWS', 'LIMIT', 'OFFSET', 'DATE', 'TIME',
-        'TIMESTAMP', 'CURRENT', 'SESSION', 'TRANSACTION', 'START', 'BEGIN',
-        # Additional Snowflake reserved keywords
-        'FETCH', 'FIRST', 'NEXT', 'ONLY', 'WITH', 'RECURSIVE', 'WINDOW', 'OVER',
-        'PARTITION', 'RANK', 'DENSE_RANK', 'ROW_NUMBER', 'LEAD', 'LAG',
-        'FIRST_VALUE', 'LAST_VALUE', 'INTERVAL', 'YEAR', 'MONTH', 'DAY', 'HOUR',
-        'MINUTE', 'SECOND', 'ZONE', 'AT', 'LOCAL', 'COMMIT', 'ROLLBACK', 'WORK',
-        'ISOLATION', 'LEVEL', 'READ', 'WRITE', 'LOCK', 'SHARE', 'EXCLUSIVE',
-        'NOWAIT', 'WAIT', 'SKIP', 'LOCKED', 'END', 'VALUE', 'TYPE', 'NAME',
-        'NUMBER', 'RESULT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'POSITION'
-    }
-    
-    def _sanitize_col_name(self, col_name: str) -> str:
-        """Sanitize column name - append _COL if it's a reserved keyword."""
-        upper_name = col_name.upper()
-        if upper_name in self.RESERVED_KEYWORDS:
-            return f"{upper_name}_COL"
-        return upper_name
-    
-    def _sanitize_schema_columns(self, schema: dict) -> dict:
-        """Sanitize all column names in schema to avoid Snowflake reserved keyword conflicts."""
-        sanitized_schema = {"sources": [], "relationships": schema.get("relationships", [])}
-        
-        for source in schema.get("sources", []):
-            sanitized_source = {
-                "name": source["name"],
-                "description": source.get("description", ""),
-                "columns": []
-            }
-            
-            for col in source.get("columns", []):
-                sanitized_col = col.copy()
-                original_name = col["name"]
-                sanitized_name = self._sanitize_col_name(original_name)
-                
-                if sanitized_name != original_name.upper():
-                    st.info(f"  ⚠️ Renamed reserved keyword column: {original_name} → {sanitized_name}")
-                
-                sanitized_col["name"] = sanitized_name
-                sanitized_source["columns"].append(sanitized_col)
-            
-            sanitized_schema["sources"].append(sanitized_source)
-        
-        return sanitized_schema
-    
-    # Native Python data generation removed - using LLM-based Data Designer exclusively
-    
-    def _get_sampler_config_for_column(self, col_name: str, col_type: str, col_info: dict) -> SamplerColumnConfig:
-        """Convert column info to a Data Designer SamplerColumnConfig based on column type and name.
-        
-        Priority order:
-        1. Handle non-VARCHAR types by their data type (ensures schema compliance)
-        2. For VARCHAR: Use GPT-provided sample_values (business-specific)
-        3. Fallback: Pattern-based values for common column names
-        4. Last resort: Generic values based on column name
-        """
-        col_name_lower = col_name.lower()
-        col_type_upper = col_type.upper() if col_type else "VARCHAR"
-        
-        # === FIRST: Handle non-VARCHAR types by their data type (ensures schema compliance) ===
-        
-        # Boolean - use string values that Snowflake can cast to BOOLEAN
-        if col_type_upper == "BOOLEAN" or "BOOL" in col_type_upper:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["TRUE", "FALSE"])  # Snowflake-compatible strings
-            )
-        
-        # Primary keys and IDs - always numeric
-        if col_info.get("is_primary_key") or "_id" in col_name_lower or col_name_lower.endswith("id"):
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=1000000)
-            )
-        
-        # Integer types
-        if col_type_upper in ["INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT"]:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=10000)
-            )
-        
-        # Decimal/Float types
-        if col_type_upper in ["DECIMAL", "FLOAT", "DOUBLE", "NUMBER", "NUMERIC", "REAL"]:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=0.0, high=1000.0)
-            )
-        
-        # Date/Timestamp types
-        if col_type_upper in ["TIMESTAMP", "DATE", "DATETIME", "TIMESTAMP_NTZ", "TIMESTAMP_LTZ", "TIMESTAMP_TZ"]:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.DATETIME,
-                params=DatetimeSamplerParams(
-                    start=(datetime.now() - timedelta(days=730)).isoformat(),
-                    end=datetime.now().isoformat()
-                )
-            )
-        
-        # === SECOND: For VARCHAR columns, use GPT sample_values if available ===
-        gpt_sample_values = col_info.get("sample_values")
-        if gpt_sample_values and isinstance(gpt_sample_values, list) and len(gpt_sample_values) > 0:
-            string_values = [
-                str(v).encode('ascii', 'ignore').decode('ascii').strip()
-                for v in gpt_sample_values
-            ]
-            string_values = [v for v in string_values if v]
-            if string_values:
-                return SamplerColumnConfig(
-                    name=col_name,
-                    sampler_type=SamplerType.CATEGORY,
-                    params=CategorySamplerParams(values=string_values)
-                )
-        
-        # === THIRD: Fallback patterns for VARCHAR columns without sample_values ===
-        first_names = ["James", "Mary", "John", "Patricia", "Robert", "Jennifer", "Michael", "Linda", 
-                       "William", "Elizabeth", "David", "Barbara", "Emma", "Oliver", "Ava", "Liam"]
-        last_names = ["Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller", "Davis", 
-                      "Rodriguez", "Martinez", "Wilson", "Anderson", "Thomas", "Taylor", "Moore"]
-        
-        # Date/Time column names (for VARCHAR columns that might hold dates)
-        if "date" in col_name_lower or "time" in col_name_lower or "_at" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.DATETIME,
-                params=DatetimeSamplerParams(
-                    start=(datetime.now() - timedelta(days=730)).isoformat(),
-                    end=datetime.now().isoformat()
-                )
-            )
-        
-        # Numeric column names (for VARCHAR columns that might hold numbers)
-        elif "price" in col_name_lower or "amount" in col_name_lower or "total" in col_name_lower or "cost" in col_name_lower or "revenue" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1.0, high=10000.0)
-            )
-        elif "quantity" in col_name_lower or "count" in col_name_lower or "number" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=1000)
-            )
-        elif "rating" in col_name_lower or "score" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=5)
-            )
-        elif "percent" in col_name_lower or "rate" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=0.0, high=100.0)
-            )
-        
-        # Name-based patterns for VARCHAR
-        elif "email" in col_name_lower:
-            emails = [f"{fn.lower()}.{ln.lower()}@example.com" for fn, ln in zip(first_names[:8], last_names[:8])]
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=emails)
-            )
-        elif "first_name" in col_name_lower or col_name_lower == "firstname":
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=first_names)
-            )
-        elif "last_name" in col_name_lower or col_name_lower == "lastname":
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=last_names)
-            )
-        elif "url" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=[
-                    "https://google.com", "https://facebook.com", "https://twitter.com",
-                    "https://linkedin.com", "https://instagram.com", "direct", "https://bing.com"
-                ])
-            )
-        elif "device" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["desktop", "mobile", "tablet", "smart_tv", "console"])
-            )
-        elif "browser" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["Chrome", "Safari", "Firefox", "Edge", "Opera"])
-            )
-        elif "country" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["USA", "UK", "Canada", "Germany", "France", "Japan", "Australia"])
-            )
-        elif "city" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["New York", "Los Angeles", "Chicago", "Houston", "Phoenix", "San Francisco"])
-            )
-        elif "status" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["active", "pending", "completed", "cancelled", "expired"])
-            )
-        elif "rating" in col_name_lower or "score" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=5)
-            )
-        elif "percent" in col_name_lower or "rate" in col_name_lower:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=0.0, high=100.0)
-            )
-        elif col_type in ["INTEGER", "INT", "BIGINT", "SMALLINT"]:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=1, high=10000)
-            )
-        elif col_type in ["DECIMAL", "FLOAT", "DOUBLE", "NUMBER", "NUMERIC"]:
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.UNIFORM,
-                params=UniformSamplerParams(low=0.0, high=1000.0)
-            )
-        elif col_type == "BOOLEAN":
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=["TRUE", "FALSE"])  # Snowflake-compatible
-            )
-        else:
-            # Default: generate values based on column name for better context
-            # Create values like "column_name_1", "column_name_2" etc.
-            base_name = col_name.replace("_", " ").title().replace(" ", "")
-            return SamplerColumnConfig(
-                name=col_name,
-                sampler_type=SamplerType.CATEGORY,
-                params=CategorySamplerParams(values=[
-                    f"{base_name}_{i}" for i in range(1, 11)
-                ])
-            )
-    
-    # Reserved keywords for DDL generation
-    # Comprehensive Snowflake reserved keywords - must match SyntheticDataGenerator and SnowflakeDataLoader
     DDL_RESERVED_KEYWORDS = {
         'TRIGGER', 'ORDER', 'TABLE', 'INDEX', 'SELECT', 'INSERT', 'UPDATE', 'DELETE',
         'CREATE', 'DROP', 'ALTER', 'FROM', 'WHERE', 'JOIN', 'ON', 'AND', 'OR', 'NOT',
@@ -970,7 +49,6 @@ JSON format (return ONLY valid JSON, no markdown):
         'FUNCTION', 'SCHEMA', 'DATABASE', 'USER', 'ROLE', 'GRANT', 'REVOKE',
         'COMMENT', 'COLUMN', 'ROW', 'ROWS', 'LIMIT', 'OFFSET', 'DATE', 'TIME',
         'TIMESTAMP', 'CURRENT', 'SESSION', 'TRANSACTION', 'START', 'BEGIN', 'END',
-        # Additional Snowflake reserved keywords
         'FETCH', 'FIRST', 'NEXT', 'ONLY', 'WITH', 'RECURSIVE', 'WINDOW', 'OVER',
         'PARTITION', 'RANK', 'DENSE_RANK', 'ROW_NUMBER', 'LEAD', 'LAG',
         'FIRST_VALUE', 'LAST_VALUE', 'INTERVAL', 'YEAR', 'MONTH', 'DAY', 'HOUR',
@@ -979,42 +57,34 @@ JSON format (return ONLY valid JSON, no markdown):
         'NOWAIT', 'WAIT', 'SKIP', 'LOCKED', 'VALUE', 'TYPE', 'NAME',
         'NUMBER', 'RESULT', 'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'POSITION'
     }
-    
-    def _sanitize_ddl_column(self, col_name: str) -> str:
-        """Sanitize column name for DDL - append _COL if reserved keyword."""
+
+    @classmethod
+    def sanitize_ddl_column(cls, col_name: str) -> str:
         upper_name = col_name.upper()
-        if upper_name in self.DDL_RESERVED_KEYWORDS:
+        if upper_name in cls.DDL_RESERVED_KEYWORDS:
             return f"{upper_name}_COL"
         return upper_name
-    
-    def generate_create_tables(self, schema: dict, database: str = "RAW_DATA", schema_name: str = "PUBLIC") -> str:
-        """Generate CREATE TABLE statements from schema."""
+
+    @classmethod
+    def generate_create_tables(cls, schema: dict, database: str = "RAW_DATA", schema_name: str = "PUBLIC") -> str:
         statements = [f"-- Create database and schema\nCREATE DATABASE IF NOT EXISTS {database};\nCREATE SCHEMA IF NOT EXISTS {database}.{schema_name};\nUSE DATABASE {database};\nUSE SCHEMA {schema_name};\n"]
-        
         for source in schema.get("sources", []):
             table_name = source["name"].upper()
             columns = []
             for col in source.get("columns", []):
-                col_name = self._sanitize_ddl_column(col["name"])
+                col_name = cls.sanitize_ddl_column(col["name"])
                 col_lower = col["name"].lower()
-                # Use the schema-defined type for all columns
                 if col_lower.endswith("_id") or col_lower == "id":
                     col_type = "INTEGER"
                 else:
                     col_type = col.get("type", "VARCHAR").upper()
                     if col_type == "VARCHAR":
                         col_type = "VARCHAR(500)"
-                    elif col_type == "DECIMAL":
+                    elif col_type in ("DECIMAL", "NUMERIC", "NUMBER"):
                         col_type = "DECIMAL(18,2)"
                 columns.append(f"    {col_name} {col_type}")
-            
-            create_stmt = f"""
-CREATE OR REPLACE TABLE {database}.{schema_name}.{table_name} (
-{',\n'.join(columns)}
-);
-"""
+            create_stmt = f"CREATE OR REPLACE TABLE {table_name} (\n" + ",\n".join(columns) + "\n);\n"
             statements.append(create_stmt)
-        
         return "\n".join(statements)
 
 
@@ -2883,12 +1953,15 @@ class DBTProjectGenerator:
         return None
 
     def _get_numeric_columns(self, columns: list) -> list:
-        """Filter for numeric columns."""
+        """Filter for numeric columns, excluding ID columns (aggregating IDs is meaningless)."""
         numeric_types = ('DECIMAL', 'INTEGER', 'INT', 'NUMBER', 'FLOAT', 'DOUBLE', 'NUMERIC')
         result = []
         for col in columns:
             ctype = col.get('type', '').upper()
             cname = col['name'].lower()
+            # Skip ID columns — sum/avg on IDs makes no sense
+            if cname.endswith('_id') or cname == 'id':
+                continue
             if ctype in numeric_types or cname in ('amount', 'total_amount', 'price',
                 'unit_price', 'quantity', 'quantity_on_hand', 'inventory_count', 'rating'):
                 result.append(col)
@@ -2906,18 +1979,30 @@ class DBTProjectGenerator:
                 and not c['name'].lower().endswith('_id')]
 
     def _find_join_key(self, model_a_cols: list, model_b_cols: list) -> str:
-        """Find a shared _id column between two models for joining."""
+        """Find a shared _id column between two models for joining.
+
+        Only returns _id columns to avoid many-to-many joins on non-unique
+        columns like 'country' or 'status' which cause duplicate rows.
+        Prefers columns that are a PK on at least one side.
+        Returns None if no safe join key exists.
+        """
         a_names = {c['name'].lower() for c in model_a_cols}
         b_names = {c['name'].lower() for c in model_b_cols}
-        shared = a_names & b_names
-        # Prefer _id columns
-        for name in sorted(shared):
-            if name.endswith('_id'):
+        shared_id_cols = sorted(
+            name for name in (a_names & b_names) if name.endswith('_id')
+        )
+        if not shared_id_cols:
+            return None
+
+        # Prefer columns that are a PK on at least one side (guarantees uniqueness)
+        a_pks = {c['name'].lower() for c in model_a_cols if c.get('is_primary_key')}
+        b_pks = {c['name'].lower() for c in model_b_cols if c.get('is_primary_key')}
+        for name in shared_id_cols:
+            if name in a_pks or name in b_pks:
                 return name
-        # Fall back to any shared column
-        if shared:
-            return sorted(shared)[0]
-        return None
+
+        # Fall back to first shared _id column (still safer than non-_id columns)
+        return shared_id_cols[0]
 
     def _get_model_columns(self, model_name: str) -> list:
         """Get the output columns for a previously generated model."""
@@ -3631,20 +2716,15 @@ from {{{{ source('raw_data', '{entity_upper}') }}}}
                 verb = v
                 break
 
-        # Build CTEs — no incremental WHERE filter. The model still uses
-        # materialized='incremental' with unique_key and merge strategy, so dbt
-        # handles deduplication. Omitting the WHERE clause avoids column mismatch
-        # errors when the target table was created with a different schema.
-        cte_parts = []
+        # Build CTE lookup — we'll filter to only deps actually used in the body
+        _all_cte_parts = {}
         for dep in deps:
             dep_cols = self._get_model_columns(dep)
             col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
-            cte_parts.append(
+            _all_cte_parts[dep] = (
                 f"    {dep} as (\n        select {col_select}\n"
                 f"        from {{{{ ref('{dep}') }}}}\n    )"
             )
-
-        ctes_sql = ",\n\n".join(cte_parts) if cte_parts else "    source_data as (select 1 as placeholder_col)"
 
         # Build SELECT based on verb
         output_cols = []
@@ -3700,7 +2780,25 @@ from {{{{ source('raw_data', '{entity_upper}') }}}}
                         output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
                 all_select = a_select + b_select
                 select_sql = ",\n    ".join(all_select)
-                body = f"select\n    {select_sql}\nfrom {dep_a}\nleft join {dep_b}\n    on {dep_a}.{join_key} = {dep_b}.{join_key}"
+
+                # Check if join key is PK on the right side — if not, the LEFT JOIN
+                # can fan out rows. Add dedup to preserve uniqueness on the left PK.
+                b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
+                needs_dedup = join_key.lower() not in b_pks and pk_col
+
+                if needs_dedup:
+                    inner_select = ",\n        ".join(all_select)
+                    body = (
+                        f"select * from (\n"
+                        f"    select\n        {inner_select},\n"
+                        f"        row_number() over (partition by {dep_a}.{pk_col} order by {dep_a}.{pk_col}) as _dedup_rn\n"
+                        f"    from {dep_a}\n"
+                        f"    left join {dep_b}\n"
+                        f"        on {dep_a}.{join_key} = {dep_b}.{join_key}\n"
+                        f") where _dedup_rn = 1"
+                    )
+                else:
+                    body = f"select\n    {select_sql}\nfrom {dep_a}\nleft join {dep_b}\n    on {dep_a}.{join_key} = {dep_b}.{join_key}"
             else:
                 # No shared key — fall back to just selecting from primary
                 select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
@@ -3746,6 +2844,10 @@ from {{{{ source('raw_data', '{entity_upper}') }}}}
 
         self._model_columns[model_name] = output_cols
 
+        # Only include CTEs that are actually referenced in the body
+        used_ctes = [_all_cte_parts[dep] for dep in deps if dep in _all_cte_parts and dep in body]
+        ctes_sql = ",\n\n".join(used_ctes) if used_ctes else f"    {primary_dep} as (select * from {{{{ ref('{primary_dep}') }}}})"
+
         return f'''{{{{ config({config}) }}}}
 
 -- Intermediate transformation: {model_name}
@@ -3756,7 +2858,7 @@ with
 
 {body}
 '''
-    
+
     def _generate_marts_sql(self, model_name, deps, mat_type):
         """Generate marts model SQL with prefix-aware patterns (fct/dim/rpt)."""
         if not deps:
@@ -3788,15 +2890,15 @@ select
             config += f", unique_key='{uk}', incremental_strategy='merge', on_schema_change='append_new_columns'"
 
         # Build CTEs — no incremental WHERE filter (same rationale as intermediate)
-        cte_parts = []
+        # Build CTE lookup — we'll filter to only deps actually used in the body
+        _all_cte_parts = {}
         for dep in deps:
             dep_cols = self._get_model_columns(dep)
             col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
-            cte_parts.append(
+            _all_cte_parts[dep] = (
                 f"    {dep} as (\n        select {col_select}\n"
                 f"        from {{{{ ref('{dep}') }}}}\n    )"
             )
-        ctes_sql = ",\n\n".join(cte_parts)
 
         # Determine model type from prefix
         output_cols = []
@@ -3825,6 +2927,7 @@ select
 
             # If we have a second dep, try to join and pull extra columns
             join_clause = ""
+            needs_dedup = False
             if len(deps) >= 2:
                 dep_b = deps[1]
                 b_cols = self._get_model_columns(dep_b)
@@ -3836,13 +2939,26 @@ select
                             alias = c['name']
                             select_exprs.append(f"{dep_b}.{alias}")
                             output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
+                    # Check if join key is PK on right side — if not, dedup needed
+                    b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
+                    needs_dedup = join_key.lower() not in b_pks and pk_col
 
             if not select_exprs:
                 select_exprs = [f"{primary_dep}.*"]
                 output_cols = list(primary_cols)
 
             select_sql = ",\n    ".join(select_exprs)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}{join_clause}"
+            if needs_dedup and join_clause:
+                inner_select = ",\n        ".join(select_exprs)
+                body = (
+                    f"select * from (\n"
+                    f"    select\n        {inner_select},\n"
+                    f"        row_number() over (partition by {primary_dep}.{pk_col} order by {primary_dep}.{pk_col}) as _dedup_rn\n"
+                    f"    from {primary_dep}{join_clause}\n"
+                    f") where _dedup_rn = 1"
+                )
+            else:
+                body = f"select\n    {select_sql}\nfrom {primary_dep}{join_clause}"
 
         elif model_name.startswith("dim_"):
             # Dimension table: select descriptive attributes, deduplicate if possible
@@ -3903,6 +3019,10 @@ select
 
         self._model_columns[model_name] = output_cols
 
+        # Only include CTEs that are actually referenced in the body
+        used_ctes = [_all_cte_parts[dep] for dep in deps if dep in _all_cte_parts and dep in body]
+        ctes_sql = ",\n\n".join(used_ctes) if used_ctes else f"    {primary_dep} as (select * from {{{{ ref('{primary_dep}') }}}})"
+
         return f'''{{{{ config({config}) }}}}
 
 -- Marts model: {model_name}
@@ -3913,7 +3033,7 @@ with
 
 {body}
 '''
-    
+
     def _generate_sources_yml(self, schema=None):
         """Generate sources.yml from the ACTUAL schema - no num_sources parameter.
         
@@ -4445,21 +3565,21 @@ def render_sidebar():
                                     st.warning("⚠️ Development env selected")
         
         # =================================================================
-        # OpenAI Configuration
+        # Anthropic Configuration
         # =================================================================
-        with st.expander("🤖 OpenAI Configuration", expanded=not st.session_state.get('openai_api_key')):
-            st.caption("For generating realistic synthetic data")
-            
-            openai_key = st.text_input(
-                "OpenAI API Key",
+        with st.expander("🤖 Anthropic Configuration", expanded=not st.session_state.get('anthropic_api_key')):
+            st.caption("For generating realistic synthetic data with Claude")
+
+            anthropic_key = st.text_input(
+                "Anthropic API Key",
                 value="",
                 type="password",
-                help="Used to generate realistic synthetic data based on customer context",
-                key="openai_api_key"
+                help="Required for Claude-powered synthetic data generation",
+                key="anthropic_api_key"
             )
-            
-            if openai_key:
-                st.success("✅ OpenAI key set")
+
+            if anthropic_key:
+                st.success("✅ Anthropic key set")
         
         # =================================================================
         # GitHub Configuration
@@ -4769,7 +3889,7 @@ def render_deploy_tab():
     st.text_area(
         "Customer Description",
         placeholder="e.g., E-commerce company selling electronics, with 2M customers, 50K products, processes 10K orders daily. They track inventory, customer behavior, marketing campaigns, and supply chain logistics.",
-        help="This description helps Data Designer generate realistic synthetic data matching the customer's domain",
+        help="This description helps Claude generate realistic synthetic data matching the customer's domain",
         height=120,
         key="customer_description"
     )
@@ -4777,8 +3897,8 @@ def render_deploy_tab():
     customer_description = st.session_state.get('customer_description', '')
     pipeline_config = st.session_state.get('pipeline_config', get_default_pipeline_config())
     
-    # Check for OpenAI and GitHub configuration
-    has_openai = bool(st.session_state.get('openai_api_key'))
+    # Check for Anthropic and GitHub configuration
+    has_anthropic = bool(st.session_state.get('anthropic_api_key'))
     has_github = bool(st.session_state.get('github_token') and st.session_state.get('github_repo'))
     
     st.markdown("---")
@@ -4789,7 +3909,7 @@ def render_deploy_tab():
     with col1:
         st.metric("dbt Cloud", "✅ Connected")
     with col2:
-        st.metric("OpenAI", "✅ Ready" if has_openai else "⚠️ Optional")
+        st.metric("Anthropic", "✅ Ready" if has_anthropic else "⚠️ Required")
     with col3:
         st.metric("GitHub", "✅ Ready" if has_github else "⚠️ Optional")
     with col4:
@@ -4801,7 +3921,7 @@ def render_deploy_tab():
     # STEP 1: Generate Schema & Synthetic Data (Combined)
     # ==========================================================================
     st.markdown("#### Step 1: Generate Schema & Synthetic Data")
-    st.info("🚀 **Fast 2-step process:** GPT-5.2 designs the schema → Data Designer generates the data")
+    st.info("🚀 **Fast 2-step process:** Claude designs the schema → Claude generates the data")
         
     # Data generation settings
     col1, col2, col3 = st.columns(3)
@@ -4818,13 +3938,13 @@ def render_deploy_tab():
             "Rows per Table", 
             options=list(row_count_options.keys()), 
             index=2,  # Default to 1,000
-            help="Number of rows per table (GPT creates schema, Data Designer creates data)"
+            help="Number of rows per table (Claude creates schema and generates data)"
         )
         rows_per_table = row_count_options[selected_row_count]
     
     # Optional: Sample DDL input
     with st.expander("📋 Optional: Provide Sample DDL", expanded=False):
-        st.caption("If you have existing DDL from the customer, paste it here. GPT will use it to create matching tables with additional supporting tables.")
+        st.caption("If you have existing DDL from the customer, paste it here. Claude will use it to create matching tables with additional supporting tables.")
         sample_ddl = st.text_area(
             "Sample DDL Statements",
             placeholder="""-- Paste customer DDL here (optional)
@@ -4839,47 +3959,49 @@ CREATE TABLE orders (
         )
     
     # Show status
-    if st.session_state.get('openai_api_key'):
-        st.success("✅ OpenAI GPT-5.2 ready")
+    if st.session_state.get('anthropic_api_key'):
+        st.success("✅ Claude API ready")
     else:
-        st.error("❌ OpenAI API key required - configure in sidebar")
-    
+        st.error("❌ Anthropic API key required - configure in sidebar")
+
     # Generate button
-    can_generate = bool(st.session_state.get('openai_api_key'))
-    
+    can_generate = bool(st.session_state.get('anthropic_api_key'))
+
     if st.button("🎨 Generate Schema & Data", type="primary", use_container_width=True, disabled=not can_generate):
         if not can_generate:
-            st.error("❌ Please configure OpenAI API key in the sidebar")
+            st.error("❌ Please configure Anthropic API key in the sidebar")
         else:
-            generator = SyntheticDataGenerator(
-                openai_api_key=st.session_state.get('openai_api_key'),
-                nvidia_api_key=st.session_state.get('nvidia_api_key')
-            )
-            
-            # Get sample DDL if provided
-            ddl_input = st.session_state.get('sample_ddl', '').strip() or None
-            
-            # Use GPT-5.2 for schema and data generation
-            result = generator.generate_schema_and_data(
-                customer_description=customer_description,
-                num_sources=pipeline_config['num_sources'],
-                rows_per_table=rows_per_table,
-                pipeline_config=pipeline_config,
-                sample_ddl=ddl_input,
-                num_columns=pipeline_config.get('avg_column_count', 30)
-            )
-            
-            if isinstance(result, dict) and "error" in result:
-                st.error(f"❌ Data generation failed: {result['error']}")
-            else:
+            try:
+                generator = SyntheticDataGenerator(
+                    anthropic_api_key=st.session_state.get('anthropic_api_key')
+                )
+
+                # Get sample DDL if provided
+                ddl_input = st.session_state.get('sample_ddl', '').strip() or None
+
+                # Use Claude for schema and data generation
+                result = generator.generate_schema_and_data(
+                    customer_description=customer_description,
+                    num_sources=pipeline_config['num_sources'],
+                    rows_per_table=rows_per_table,
+                    sample_ddl=ddl_input,
+                    num_columns=pipeline_config.get('avg_column_count', 30)
+                )
+
                 st.session_state['generated_schema'] = result['schema']
                 st.session_state['generated_dataframes'] = result['dataframes']
                 total_rows = sum(len(df) for df in result['dataframes'].values())
                 st.success(f"✅ Generated {total_rows:,} total rows across {len(result['dataframes'])} tables!")
-        
+
+            except ValueError as e:
+                st.error(f"❌ Data generation error: {e}")
+            except Exception as e:
+                error_type = type(e).__name__
+                st.error(f"❌ Claude API error ({error_type}): {e}")
+
         # Generate DDL after data generation
         if st.session_state.get('generated_schema'):
-            ddl = generator.generate_create_tables(st.session_state['generated_schema'], raw_database, raw_schema)
+            ddl = _LegacyDDLGenerator.generate_create_tables(st.session_state['generated_schema'], raw_database, raw_schema)
             st.session_state['generated_ddl'] = ddl
         
     # Show generated schema

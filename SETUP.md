@@ -6,7 +6,7 @@
 - Python 3.10 or higher
 - A Snowflake account
 - A dbt Cloud account with API access
-- An OpenAI API key
+- An Anthropic API key
 - A GitHub repository for dbt models
 
 ### Step 1: Install Dependencies
@@ -49,8 +49,8 @@ In the sidebar, you'll need to provide:
    - Personal Access Token (with `repo` scope)
    - Repository name (format: `owner/repo-name`)
 
-4. **OpenAI API Key**
-   - For synthetic data generation
+4. **Anthropic API Key**
+   - For Claude-powered synthetic data generation
 
 ---
 

@@ -21,9 +21,9 @@ This tool enables dbt Labs sales engineers to:
 - Data characteristics (row count, column count)
 
 ### 🎲 Synthetic Data Generation
-- **NVIDIA Data Designer** integration for high-quality synthetic data
-- **Snowflake Cortex** fallback for in-Snowflake generation
-- Realistic business data patterns (customers, orders, transactions, etc.)
+- **Claude API** (Anthropic) for intelligent schema and data generation
+- Realistic business data patterns driven by customer description prompt
+- Referential integrity enforcement across all generated tables
 
 ### 🚀 dbt Cloud Integration
 - Automated sandbox project creation
@@ -44,7 +44,7 @@ This tool enables dbt Labs sales engineers to:
 - Python 3.10+
 - dbt Cloud account with API access
 - Snowflake account
-- OpenAI API key (for Data Designer) or NVIDIA API key
+- Anthropic API key (for Claude-powered data generation)
 
 ### Setup
 
@@ -73,7 +73,7 @@ cp .env.example .env
 
 5. Run the application:
 ```bash
-streamlit run app.py
+streamlit run app_snowflake.py
 ```
 
 ## Configuration
@@ -85,7 +85,7 @@ streamlit run app.py
 | `DBT_CLOUD_ACCOUNT_ID` | Your dbt Cloud account ID |
 | `DBT_CLOUD_API_TOKEN` | dbt Cloud API token |
 | `DBT_CLOUD_SANDBOX_PROJECT_ID` | Sandbox project ID for simulations |
-| `OPENAI_API_KEY` | OpenAI API key for Data Designer |
+| `ANTHROPIC_API_KEY` | Anthropic API key for Claude data generation |
 | `SNOWFLAKE_ACCOUNT` | Snowflake account identifier |
 | `SNOWFLAKE_WAREHOUSE` | Warehouse for sandbox operations |
 | `SNOWFLAKE_DATABASE` | Database for synthetic data |
