@@ -1604,6 +1604,122 @@ class SAOComparisonEngine:
 
 
 # =============================================================================
+# CONE DAG SIZING - Shared helper for both simulation engine and project generator
+# =============================================================================
+
+# Cone taper ratio — each layer above L1 is ~60% the width of the one below it.
+_CONE_RATIO = 0.6
+# Downstream layer ratios relative to num_sources. L1 is pinned to num_sources
+# (1:1 with staging so every source becomes one L1 model's primary dep, no orphans).
+# L2..reports taper geometrically: 0.60 S, 0.36 S, 0.216 S, 0.1296 S.
+_CONE_DOWNSTREAM_RATIOS = [
+    _CONE_RATIO,          # L2      — ~0.60 S
+    _CONE_RATIO ** 2,     # L3      — ~0.36 S
+    _CONE_RATIO ** 3,     # marts   — ~0.216 S
+    _CONE_RATIO ** 4,     # reports — ~0.1296 S
+]
+
+
+def compute_cone_widths(num_sources: int, num_models: int):
+    """Distribute non-staging models across L1/L2/L3/marts/reports in a cone shape.
+
+    Layer invariants:
+      - Staging is num_sources (1:1 with sources).
+      - L1 is also num_sources (1:1 with staging) — this is what guarantees every
+        source flows downstream, since every staging becomes some L1's primary dep.
+      - L2/L3/marts/reports taper with ratio 0.6 and are scaled proportionally so
+        the five layers sum to num_models - num_sources.
+      - Every layer floored at 1, kept monotonically non-increasing.
+
+    Returns: (L1, L2, L3, marts, reports)
+    """
+    import math as _math
+
+    s = max(0, int(num_sources))
+    non_staging_target = max(0, int(num_models) - s)
+
+    if non_staging_target <= 0:
+        return (0, 0, 0, 0, 0)
+
+    # L1 is fixed at num_sources.
+    l1 = s
+    downstream_budget = non_staging_target - l1
+
+    if downstream_budget <= 0:
+        # Not enough budget for any tapered layers — give L1 whatever we have,
+        # leave the rest as zeros. Caller's UI warning handles this path.
+        return (non_staging_target, 0, 0, 0, 0)
+
+    # Ideal widths for L2..reports.
+    ideal = [s * r for r in _CONE_DOWNSTREAM_RATIOS]
+    ideal_sum = sum(ideal)
+    if ideal_sum <= 0:
+        ideal = [1.0, 1.0, 1.0, 1.0]
+        ideal_sum = 4.0
+
+    scale = downstream_budget / ideal_sum
+    raw = [v * scale for v in ideal]
+
+    # Largest-remainder rounding so the four tapered layers sum to downstream_budget.
+    floors = [int(_math.floor(v)) for v in raw]
+    remainder = downstream_budget - sum(floors)
+    fractional = sorted(
+        range(len(raw)),
+        key=lambda i: (raw[i] - floors[i], -i),  # ties: prefer earlier (wider) layer
+        reverse=True,
+    )
+    tapered = list(floors)
+    for i in fractional[:max(0, remainder)]:
+        tapered[i] += 1
+
+    # Floor every tapered layer at 1; pull overflow from widest layer that has slack.
+    for i in range(len(tapered)):
+        if tapered[i] < 1:
+            tapered[i] = 1
+    overflow = sum(tapered) - downstream_budget
+    while overflow > 0:
+        trimmed = False
+        for i in range(len(tapered)):
+            if tapered[i] > 1:
+                tapered[i] -= 1
+                overflow -= 1
+                trimmed = True
+                break
+        if not trimmed:
+            break
+
+    widths = [l1] + tapered
+
+    # Enforce monotonic non-increasing (each layer ≤ previous).
+    for i in range(1, len(widths)):
+        if widths[i] > widths[i - 1]:
+            excess = widths[i] - widths[i - 1]
+            widths[i] -= excess
+            widths[i - 1] += excess
+
+    return tuple(widths)
+
+
+def recommended_model_count(num_sources: int) -> int:
+    """Minimum cone-friendly model count — staging + L1 + tapered layers.
+
+    Equals 2S + ceil(S * 1.3056), floored at 2S + 4 so every tapered layer has
+    at least 1 model.
+    """
+    import math as _math
+    s = max(0, int(num_sources))
+    downstream = sum(_CONE_DOWNSTREAM_RATIOS)
+    floor = minimum_supported_model_count(s)
+    return max(floor, 2 * s + _math.ceil(s * downstream))
+
+
+def minimum_supported_model_count(num_sources: int) -> int:
+    """Absolute floor for a cone — staging + L1 (each = S) plus 4 tapered layers."""
+    s = max(0, int(num_sources))
+    return 2 * s + 4
+
+
+# =============================================================================
 # SAO SIMULATION ENGINE - Projects ROI without running actual jobs
 # =============================================================================
 
@@ -1655,16 +1771,11 @@ class SAOSimulationEngine:
         materializations = self.pipeline_config.get('materialization', {'incremental': 30, 'table': 40, 'view': 30})
         dag_depth = self.pipeline_config.get('dag_depth', 4)
         
-        # Calculate layer distribution based on typical DAG structure
+        # Calculate layer distribution using the shared cone-shape helper so the
+        # analysis pane matches what the project generator will actually produce.
         staging_count = num_sources  # 1:1 with sources
-        remaining = max(0, num_models - staging_count)
-        
-        # Layer distribution
-        int_layer1 = int(remaining * 0.25)
-        int_layer2 = int(remaining * 0.20)
-        int_layer3 = int(remaining * 0.15)
-        marts_count = int(remaining * 0.25)
-        reports_count = remaining - int_layer1 - int_layer2 - int_layer3 - marts_count
+        int_layer1, int_layer2, int_layer3, marts_count, reports_count = \
+            compute_cone_widths(num_sources, num_models)
         
         # Calculate materializations per layer
         incremental_count = int(num_models * materializations.get('incremental', 30) / 100)
@@ -2008,6 +2119,45 @@ class DBTProjectGenerator:
         """Get the output columns for a previously generated model."""
         return self._model_columns.get(model_name, [])
 
+    def _distribute_staging_to_layer1(self, staging_models: list, layer1_count: int) -> list:
+        """Assign staging models to L1 slots so each staging becomes exactly one
+        L1 model's primary dep (zero orphans).
+
+        With the cone formula L1 == num_sources, this is a straight 1:1 mapping in
+        shuffled order. Defensive handling kept for edge cases where L1 != S
+        (e.g. user provides M so low the generator compresses layers).
+
+        Returns a list of length layer1_count, where each element is the primary
+        dep list (always length 1 after this method).
+        """
+        if not staging_models:
+            return [[] for _ in range(max(1, layer1_count))]
+
+        shuffled = list(staging_models)
+        random.shuffle(shuffled)
+        assignments = [[] for _ in range(max(1, layer1_count))]
+
+        # Pass 1: each L1 slot gets one unique source (in shuffled order).
+        for i in range(len(assignments)):
+            if i < len(shuffled):
+                assignments[i].append(shuffled[i])
+
+        # Pass 2: if more sources than L1 slots (L1 < S), distribute the leftover
+        # sources round-robin so every source is still primary somewhere. Prepending
+        # keeps the leftover source as deps[0] in its slot — which is what the SQL
+        # builders actually reference. This preserves the no-orphan invariant.
+        for idx in range(len(assignments), len(shuffled)):
+            target = idx % len(assignments)
+            assignments[target].insert(0, shuffled[idx])
+
+        # Pass 3: if more L1 slots than sources (L1 > S), fill empty slots with a
+        # random existing staging — orphan invariant still holds (all sources are
+        # already covered by earlier passes).
+        for i, deps in enumerate(assignments):
+            if not deps:
+                assignments[i] = [random.choice(staging_models)]
+        return assignments
+
     def generate_models(self, pipeline_config: dict, schema: dict = None,
                         target_database: str = "RAW_DATA", target_schema: str = "PUBLIC") -> dict:
         """Generate dbt model SQL files respecting user-specified counts and materializations.
@@ -2088,46 +2238,61 @@ class DBTProjectGenerator:
             return models
         
         # =====================================================================
-        # REALISTIC DAG GENERATION WITH MULTIPLE LAYERS
+        # REALISTIC CONE-SHAPED DAG GENERATION
         # =====================================================================
         # Structure: source -> staging -> int_layer1 -> int_layer2 -> int_layer3 -> marts -> reports
-        # This creates realistic depth with multiple dependency chains
-        
-        # Calculate layer distribution for realistic DAG depth
-        # Layer 1 intermediate: 25% (references staging)
-        # Layer 2 intermediate: 20% (references layer 1 + staging)
-        # Layer 3 intermediate: 15% (references layer 2 + layer 1)
-        # Marts: 25% (references all intermediate layers)
-        # Reports/Aggregates: 15% (references marts + intermediate)
-        
-        int_layer1_count = max(1, int(remaining_models * 0.25))
-        int_layer2_count = max(1, int(remaining_models * 0.20))
-        int_layer3_count = max(1, int(remaining_models * 0.15))
-        marts_count = max(1, int(remaining_models * 0.25))
-        reports_count = remaining_models - int_layer1_count - int_layer2_count - int_layer3_count - marts_count
-        
+        # Layers taper geometrically (ratio ~0.6) so the DAG looks like a cone with
+        # staging as the wide base. Every source flows downstream — L1 dep assignment
+        # uses round-robin over all staging models so none are orphaned.
+
+        int_layer1_count, int_layer2_count, int_layer3_count, marts_count, reports_count = \
+            compute_cone_widths(num_sources=num_staging, num_models=num_models)
+
         # ----- GENERATE INTERMEDIATE LAYER 1 (references staging) -----
+        # L1 is 1:1 with staging (see compute_cone_widths) — every staging becomes
+        # exactly one L1 model's primary dep, so no source is ever orphaned. We
+        # derive the model's entity name from its primary staging so the model
+        # name actually reflects what it transforms (e.g. stg_customers →
+        # int_customers_cleaned, not int_orders_cleaned).
         int_layer1_models = []
         used_int_names = set()
         layer1_verbs = ["cleaned", "filtered", "validated", "enriched"]
-        
+        l1_dep_assignment = self._distribute_staging_to_layer1(staging_models, int_layer1_count)
+
         for i in range(int_layer1_count):
-            entity = self.available_entities[i % len(self.available_entities)]
+            deps = list(l1_dep_assignment[i]) if i < len(l1_dep_assignment) else []
             verb = layer1_verbs[i % len(layer1_verbs)]
-            
+
+            # Entity is derived from the primary staging, not the iteration index,
+            # so the model name tells the truth about its source.
+            if deps:
+                primary = deps[0]
+                entity = primary[len("stg_"):] if primary.startswith("stg_") else primary
+            else:
+                entity = self.available_entities[i % len(self.available_entities)] \
+                         if self.available_entities else "model"
+
             model_name = f"int_{entity}_{verb}"
             if model_name in used_int_names:
                 model_name = f"int_{entity}_{verb}_{i}"
             used_int_names.add(model_name)
-            
-            # Layer 1 references 1-3 staging models
-            num_deps = min(3, len(staging_models))
-            deps = random.sample(staging_models, num_deps) if staging_models else []
             mat_type = get_next_materialization()
-            
+
             sql = self._generate_intermediate_sql(model_name, deps, mat_type)
             models[f"models/intermediate/{model_name}.sql"] = sql
             int_layer1_models.append(model_name)
+
+        # Invariant check: every staging model must be referenced by at least one L1.
+        if staging_models:
+            covered = set()
+            for assignment in l1_dep_assignment:
+                # Only deps[0] ends up in the generated SQL for single-dep verbs,
+                # so coverage = set of primary deps across L1 slots.
+                if assignment:
+                    covered.add(assignment[0])
+            missing = set(staging_models) - covered
+            if missing:
+                print(f"⚠️ Cone DAG orphan check: {len(missing)} staging model(s) not covered by L1 as primary dep: {sorted(missing)}")
         
         # ----- GENERATE INTERMEDIATE LAYER 2 (references layer 1 + staging) -----
         int_layer2_models = []
@@ -2686,21 +2851,34 @@ select
 from {{{{ source('raw_data', '{entity_upper}') }}}}
 '''
     
+    # =========================================================================
+    # INTERMEDIATE SQL GENERATION
+    # =========================================================================
+    # Each verb has a dedicated builder returning (ctes, outer_sql, output_cols).
+    # CTEs are emitted only when they do real work (filter, aggregate, window,
+    # computed column, or dropped columns). Pure pass-through wrappers are
+    # dropped — the outer select then references {{ ref(...) }} directly. This
+    # is what makes the generated SQL look hand-written.
+
+    _INTERMEDIATE_VERBS = [
+        "cleaned", "filtered", "validated", "enriched",
+        "joined", "aggregated", "pivoted", "mapped",
+        "combined", "transformed", "calculated", "derived",
+    ]
+
     def _generate_intermediate_sql(self, model_name, deps, mat_type):
-        """Generate intermediate model SQL with realistic transformations based on verb."""
+        """Generate intermediate model SQL dispatched on the verb in the model name."""
         if not deps:
             deps = [list(self._model_columns.keys())[0]] if self._model_columns else []
 
         primary_dep = deps[0] if deps else None
         primary_cols = self._get_model_columns(primary_dep) if primary_dep else []
 
-        # Determine the unique key for incremental models
         pk_col = None
         for c in primary_cols:
             if c.get('is_primary_key') or c['name'].endswith('_id'):
                 pk_col = c['name']
                 break
-
         ts_col = self._get_timestamp_column(primary_cols)
 
         config = f"materialized='{mat_type}'"
@@ -2708,175 +2886,479 @@ from {{{{ source('raw_data', '{entity_upper}') }}}}
             uk = pk_col or 'id'
             config += f", unique_key='{uk}', incremental_strategy='merge', on_schema_change='append_new_columns'"
 
-        # Determine verb from model name to choose transformation pattern
-        verb = None
-        for v in ["cleaned", "filtered", "validated", "enriched", "joined", "aggregated",
-                   "pivoted", "mapped", "combined", "transformed", "calculated", "derived"]:
-            if v in model_name:
-                verb = v
-                break
+        verb = next((v for v in self._INTERMEDIATE_VERBS if v in model_name), None)
 
-        # Build CTE lookup — we'll filter to only deps actually used in the body
-        _all_cte_parts = {}
-        for dep in deps:
-            dep_cols = self._get_model_columns(dep)
-            col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
-            _all_cte_parts[dep] = (
-                f"    {dep} as (\n        select {col_select}\n"
-                f"        from {{{{ ref('{dep}') }}}}\n    )"
-            )
-
-        # Build SELECT based on verb
-        output_cols = []
-        if verb in ("filtered", "validated", "cleaned") and primary_cols:
-            select_cols = [c['name'] for c in primary_cols]
-            output_cols = list(primary_cols)
-            # Add a WHERE clause for filtering
-            cat_cols = self._get_categorical_columns(primary_cols)
-            where_clause = ""
-            if verb == "filtered" and cat_cols:
-                where_clause = f"\nwhere {cat_cols[0]['name']} is not null"
-            elif verb == "validated" and pk_col:
-                where_clause = f"\nwhere {pk_col} is not null"
-            elif verb == "cleaned":
-                where_clause = ""
-                # Just select cleaned columns
-            select_sql = ",\n    ".join(select_cols)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}{where_clause}"
-
-        elif verb == "enriched" and primary_cols:
-            select_cols = [c['name'] for c in primary_cols]
-            output_cols = list(primary_cols)
-            # Add computed columns
-            enrichments = []
-            if ts_col:
-                enrichments.append(f"datediff('day', {ts_col}, current_timestamp()) as days_since_{ts_col}")
-                output_cols.append({"name": f"days_since_{ts_col}", "type": "INTEGER"})
-            num_cols = self._get_numeric_columns(primary_cols)
-            if num_cols:
-                nc = num_cols[0]['name']
-                enrichments.append(f"case when {nc} > 0 then 'positive' else 'non_positive' end as {nc}_category")
-                output_cols.append({"name": f"{nc}_category", "type": "VARCHAR"})
-            all_cols = select_cols + enrichments
-            select_sql = ",\n    ".join(all_cols)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}"
-
-        elif verb in ("joined",) and len(deps) >= 2:
-            dep_a = deps[0]
-            dep_b = deps[1]
-            a_cols = self._get_model_columns(dep_a)
-            b_cols = self._get_model_columns(dep_b)
-            join_key = self._find_join_key(a_cols, b_cols)
-
-            if join_key and a_cols and b_cols:
-                # Select columns from both, prefixing the second table's non-key cols
-                a_select = [f"{dep_a}.{c['name']}" for c in a_cols]
-                b_select = [f"{dep_b}.{c['name']} as {dep_b.replace('stg_', '').replace('int_', '')}_{c['name']}"
-                            for c in b_cols if c['name'] != join_key]
-                output_cols = list(a_cols)
-                for c in b_cols:
-                    if c['name'] != join_key:
-                        alias = f"{dep_b.replace('stg_', '').replace('int_', '')}_{c['name']}"
-                        output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
-                all_select = a_select + b_select
-                select_sql = ",\n    ".join(all_select)
-
-                # Check if join key is PK on the right side — if not, the LEFT JOIN
-                # can fan out rows. Add dedup to preserve uniqueness on the left PK.
-                b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
-                needs_dedup = join_key.lower() not in b_pks and pk_col
-
-                if needs_dedup:
-                    inner_select = ",\n        ".join(all_select)
-                    body = (
-                        f"select * from (\n"
-                        f"    select\n        {inner_select},\n"
-                        f"        row_number() over (partition by {dep_a}.{pk_col} order by {dep_a}.{pk_col}) as _dedup_rn\n"
-                        f"    from {dep_a}\n"
-                        f"    left join {dep_b}\n"
-                        f"        on {dep_a}.{join_key} = {dep_b}.{join_key}\n"
-                        f") where _dedup_rn = 1"
-                    )
-                else:
-                    body = f"select\n    {select_sql}\nfrom {dep_a}\nleft join {dep_b}\n    on {dep_a}.{join_key} = {dep_b}.{join_key}"
-            else:
-                # No shared key — fall back to just selecting from primary
-                select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
-                output_cols = list(primary_cols) if primary_cols else []
-                select_sql = ",\n    ".join(select_cols)
-                body = f"select\n    {select_sql}\nfrom {primary_dep}"
-
-        elif verb == "aggregated" and primary_cols:
-            cat_cols = self._get_categorical_columns(primary_cols)
-            num_cols = self._get_numeric_columns(primary_cols)
-            group_col = cat_cols[0]['name'] if cat_cols else (primary_cols[0]['name'] if primary_cols else 'id')
-            agg_exprs = [group_col, f"count(*) as record_count"]
-            output_cols = [{"name": group_col, "type": "VARCHAR"}, {"name": "record_count", "type": "INTEGER"}]
-            for nc in num_cols[:3]:
-                agg_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
-                agg_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
-                output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
-                output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
-            select_sql = ",\n    ".join(agg_exprs)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}\ngroup by {group_col}"
-
-        elif verb in ("pivoted", "mapped") and primary_cols:
-            cat_cols = self._get_categorical_columns(primary_cols)
-            select_cols = [c['name'] for c in primary_cols]
-            output_cols = list(primary_cols)
-            if cat_cols:
-                cc = cat_cols[0]['name']
-                select_cols.append(
-                    f"case\n        when {cc} in ('active', 'completed', 'delivered') then 'success'\n"
-                    f"        when {cc} in ('pending', 'shipped') then 'in_progress'\n"
-                    f"        else 'other'\n    end as {cc}_group"
-                )
-                output_cols.append({"name": f"{cc}_group", "type": "VARCHAR"})
-            select_sql = ",\n    ".join(select_cols)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}"
-
-        else:
-            # Default: select columns from primary dep
-            select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
-            output_cols = list(primary_cols) if primary_cols else []
-            select_sql = ",\n    ".join(select_cols)
-            body = f"select\n    {select_sql}\nfrom {primary_dep}"
-
+        builders = {
+            'cleaned': self._build_cleaned,
+            'filtered': self._build_filtered,
+            'validated': self._build_validated,
+            'enriched': self._build_enriched,
+            'joined': self._build_joined,
+            'aggregated': self._build_aggregated,
+            'pivoted': self._build_pivot_map,
+            'mapped': self._build_pivot_map,
+            'combined': self._build_combined,
+            'transformed': self._build_transformed,
+            'calculated': self._build_calculated,
+            'derived': self._build_derived,
+        }
+        builder = builders.get(verb, self._build_passthrough)
+        ctes, outer_sql, output_cols = builder(model_name, deps, primary_cols, pk_col, ts_col)
         self._model_columns[model_name] = output_cols
+        return self._render_model(model_name, config, "Intermediate transformation", ctes, outer_sql)
 
-        # Only include CTEs that are actually referenced in the body
-        used_ctes = [_all_cte_parts[dep] for dep in deps if dep in _all_cte_parts and dep in body]
-        ctes_sql = ",\n\n".join(used_ctes) if used_ctes else f"    {primary_dep} as (select * from {{{{ ref('{primary_dep}') }}}})"
+    # ---------- rendering ----------
 
-        return f'''{{{{ config({config}) }}}}
+    def _render_model(self, model_name: str, config: str, kind: str,
+                      ctes: list, outer_sql: str) -> str:
+        """Render a dbt model file. If ctes is empty, no `with` block is emitted —
+        the outer_sql stands on its own. This is how pass-through wrappers are
+        killed: a verb that has nothing to transform returns no CTEs, and the
+        outer select references `{{ ref(...) }}` directly.
 
--- Intermediate transformation: {model_name}
--- Dependencies: {', '.join(deps)}
+        Each CTE is a tuple of (name, body). The body must already be a full
+        `select ... from ...` SQL fragment; this helper only handles indentation
+        and the surrounding `with name as ( ... )` syntax.
+        """
+        header = f"{{{{ config({config}) }}}}\n\n-- {kind}: {model_name}\n"
+        if not ctes:
+            return f"{header}\n{outer_sql}\n"
 
-with
-{ctes_sql}
+        rendered_ctes = []
+        for name, body in ctes:
+            indented = body.replace("\n", "\n        ")
+            rendered_ctes.append(f"    {name} as (\n        {indented}\n    )")
+        cte_block = "with\n" + ",\n\n".join(rendered_ctes)
+        return f"{header}\n{cte_block}\n\n{outer_sql}\n"
 
-{body}
-'''
+    def _format_select(self, projections: list, from_clause: str,
+                        where: str = "", group_by: str = "",
+                        order_by: str = "") -> str:
+        """Render a SELECT statement from a list of projection expressions."""
+        proj_sql = ",\n    ".join(projections) if projections else "*"
+        sql = f"select\n    {proj_sql}\nfrom {from_clause}"
+        if where:
+            sql += f"\nwhere {where}"
+        if group_by:
+            sql += f"\ngroup by {group_by}"
+        if order_by:
+            sql += f"\norder by {order_by}"
+        return sql
+
+    @staticmethod
+    def _ref(dep: str) -> str:
+        """Emit a dbt ref() call suitable for an f-string."""
+        return f"{{{{ ref('{dep}') }}}}"
+
+    @staticmethod
+    def _dep_alias(dep: str) -> str:
+        """Short, human-friendly alias for a dep (strips stg_/int_/dim_/fct_)."""
+        for prefix in ("stg_", "int_", "dim_", "fct_"):
+            if dep.startswith(prefix):
+                return dep[len(prefix):]
+        return dep
+
+    # ---------- verb builders ----------
+
+    def _build_passthrough(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Fallback when verb is unknown or primary_cols is empty. No CTE — just
+        select directly from the primary dep."""
+        primary_dep = deps[0] if deps else None
+        if not primary_dep:
+            return [], "select 1 as id", [{"name": "id", "type": "INTEGER"}]
+        projections = [c['name'] for c in primary_cols] if primary_cols else ["*"]
+        outer = self._format_select(projections, self._ref(primary_dep))
+        return [], outer, list(primary_cols)
+
+    def _build_cleaned(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE applies trim/lower/coalesce cleanup + drops null-PK rows. Real work
+        happens in the CTE; outer select just reads from it."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        numeric_types = ('DECIMAL', 'NUMERIC', 'NUMBER', 'FLOAT', 'DOUBLE')
+        projections = []
+        did_clean = False
+        for c in primary_cols:
+            name = c['name']
+            lname = name.lower()
+            ctype = c.get('type', '').upper()
+            if lname == 'email':
+                projections.append(f"lower(trim({name})) as {name}")
+                did_clean = True
+            elif lname in ('name', 'first_name', 'last_name', 'product_name', 'description',
+                            'customer_name', 'company_name'):
+                projections.append(f"trim({name}) as {name}")
+                did_clean = True
+            elif ctype in numeric_types and not lname.endswith('_id') and lname != 'id':
+                projections.append(f"coalesce({name}, 0) as {name}")
+                did_clean = True
+            else:
+                projections.append(name)
+
+        where = f"{pk_col} is not null" if pk_col else ""
+        # If no cleaning and no where, drop the CTE to avoid pass-through.
+        if not did_clean and not where:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        cte_body = self._format_select(projections, self._ref(primary_dep), where=where)
+        outer = f"select * from cleaned"
+        return [("cleaned", cte_body)], outer, list(primary_cols)
+
+    def _build_filtered(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE applies row filtering — WHERE on first categorical, timestamp range,
+        or primary key."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        cat_cols = self._get_categorical_columns(primary_cols)
+        where_parts = []
+        if cat_cols:
+            cc = cat_cols[0]['name']
+            where_parts.append(f"{cc} is not null")
+            where_parts.append(f"lower({cc}) not in ('unknown', 'n/a', '')")
+        elif ts_col:
+            where_parts.append(f"{ts_col} >= dateadd('year', -2, current_date)")
+        elif pk_col:
+            where_parts.append(f"{pk_col} is not null")
+        else:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        where = " and ".join(where_parts)
+        projections = [c['name'] for c in primary_cols]
+        cte_body = self._format_select(projections, self._ref(primary_dep), where=where)
+        outer = "select * from filtered"
+        return [("filtered", cte_body)], outer, list(primary_cols)
+
+    def _build_validated(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE validates invariants — PK not null, first numeric non-negative."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        num_cols = self._get_numeric_columns(primary_cols)
+        where_parts = []
+        if pk_col:
+            where_parts.append(f"{pk_col} is not null")
+        if num_cols:
+            where_parts.append(f"{num_cols[0]['name']} >= 0")
+        if not where_parts and primary_cols:
+            where_parts.append(f"{primary_cols[0]['name']} is not null")
+        if not where_parts:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        projections = [c['name'] for c in primary_cols]
+        cte_body = self._format_select(projections, self._ref(primary_dep),
+                                        where=" and ".join(where_parts))
+        outer = "select * from validated"
+        return [("validated", cte_body)], outer, list(primary_cols)
+
+    def _build_enriched(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """No CTE — outer select directly adds computed columns to the ref."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        projections = [c['name'] for c in primary_cols]
+        output_cols = list(primary_cols)
+        added = False
+        if ts_col:
+            projections.append(
+                f"datediff('day', {ts_col}, current_timestamp()) as days_since_{ts_col}"
+            )
+            output_cols.append({"name": f"days_since_{ts_col}", "type": "INTEGER"})
+            added = True
+        num_cols = self._get_numeric_columns(primary_cols)
+        if num_cols:
+            nc = num_cols[0]['name']
+            projections.append(
+                f"case when {nc} > 0 then 'positive' else 'non_positive' end as {nc}_category"
+            )
+            output_cols.append({"name": f"{nc}_category", "type": "VARCHAR"})
+            added = True
+
+        if not added:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        outer = self._format_select(projections, self._ref(primary_dep))
+        return [], outer, output_cols
+
+    def _build_joined(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Inline two-table join from refs directly — no CTE wrappers. If the
+        second dep is missing or no shared join key exists, fall back to
+        passthrough."""
+        if len(deps) < 2:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+        dep_a, dep_b = deps[0], deps[1]
+        a_cols = self._get_model_columns(dep_a)
+        b_cols = self._get_model_columns(dep_b)
+        join_key = self._find_join_key(a_cols, b_cols)
+        if not (join_key and a_cols and b_cols):
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        alias_a = self._dep_alias(dep_a)
+        alias_b = self._dep_alias(dep_b)
+        # Avoid alias collision if two deps strip to the same name.
+        if alias_a == alias_b:
+            alias_a = f"{alias_a}_a"
+            alias_b = f"{alias_b}_b"
+
+        a_select = [f"{alias_a}.{c['name']}" for c in a_cols]
+        b_prefix = self._dep_alias(dep_b)
+        b_select = [
+            f"{alias_b}.{c['name']} as {b_prefix}_{c['name']}"
+            for c in b_cols if c['name'] != join_key
+        ]
+        output_cols = list(a_cols)
+        for c in b_cols:
+            if c['name'] != join_key:
+                output_cols.append({
+                    "name": f"{b_prefix}_{c['name']}",
+                    "type": c.get('type', 'VARCHAR'),
+                })
+        projections = a_select + b_select
+
+        b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
+        needs_dedup = join_key.lower() not in b_pks and pk_col
+
+        from_clause = (
+            f"{self._ref(dep_a)} as {alias_a}\n"
+            f"left join {self._ref(dep_b)} as {alias_b}\n"
+            f"    on {alias_a}.{join_key} = {alias_b}.{join_key}"
+        )
+
+        if needs_dedup:
+            # Wrap the join in a subquery with row_number to keep one row per
+            # left-side PK. This is a genuine transformation — no pass-through.
+            inner_projections = list(projections) + [
+                f"row_number() over (partition by {alias_a}.{pk_col} "
+                f"order by {alias_a}.{pk_col}) as _dedup_rn"
+            ]
+            inner_sql = self._format_select(inner_projections, from_clause)
+            outer = (
+                f"select\n    "
+                + ",\n    ".join([p.split(" as ")[-1] if " as " in p else p.split(".")[-1]
+                                  for p in projections])
+                + f"\nfrom (\n    "
+                + inner_sql.replace("\n", "\n    ")
+                + f"\n) as joined_rows\nwhere _dedup_rn = 1"
+            )
+            return [], outer, output_cols
+
+        outer = self._format_select(projections, from_clause)
+        return [], outer, output_cols
+
+    def _build_aggregated(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE filters nulls on group key; outer aggregates by category with sum/avg."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        cat_cols = self._get_categorical_columns(primary_cols)
+        num_cols = self._get_numeric_columns(primary_cols)
+        group_col = (cat_cols[0]['name'] if cat_cols
+                     else (primary_cols[0]['name'] if primary_cols else 'id'))
+
+        # CTE: non-pass-through because it filters group_col is not null.
+        cte_projections = [c['name'] for c in primary_cols]
+        cte_body = self._format_select(
+            cte_projections, self._ref(primary_dep),
+            where=f"{group_col} is not null",
+        )
+
+        agg_exprs = [group_col, "count(*) as record_count"]
+        output_cols = [
+            {"name": group_col, "type": "VARCHAR"},
+            {"name": "record_count", "type": "INTEGER"},
+        ]
+        for nc in num_cols[:3]:
+            agg_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
+            agg_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
+            output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
+            output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
+
+        outer = self._format_select(agg_exprs, "filtered", group_by=group_col)
+        return [("filtered", cte_body)], outer, output_cols
+
+    def _build_pivot_map(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE adds a case-based category column — real transformation earns the CTE."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        cat_cols = self._get_categorical_columns(primary_cols)
+        if not cat_cols:
+            # No categorical to pivot on — fall back to passthrough so no useless CTE.
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        cc = cat_cols[0]['name']
+        projections = [c['name'] for c in primary_cols] + [
+            "case\n        "
+            f"when {cc} in ('active', 'completed', 'delivered') then 'success'\n        "
+            f"when {cc} in ('pending', 'shipped', 'processing') then 'in_progress'\n        "
+            f"else 'other'\n    end as {cc}_group"
+        ]
+        output_cols = list(primary_cols) + [{"name": f"{cc}_group", "type": "VARCHAR"}]
+
+        cte_body = self._format_select(projections, self._ref(primary_dep))
+        outer = "select * from with_category"
+        return [("with_category", cte_body)], outer, output_cols
+
+    def _build_combined(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Two deps unioned together — CTEs project a shared schema so UNION ALL
+        works. Each CTE drops to the common column set, which is a real column
+        transformation (not a pass-through)."""
+        if len(deps) < 2:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+        dep_a, dep_b = deps[0], deps[1]
+        a_cols = self._get_model_columns(dep_a)
+        b_cols = self._get_model_columns(dep_b)
+        if not (a_cols and b_cols):
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        a_names = {c['name'] for c in a_cols}
+        b_names = {c['name'] for c in b_cols}
+        shared = [c for c in a_cols if c['name'] in b_names]
+        # Need at least 2 shared columns for a meaningful union.
+        if len(shared) < 2:
+            return self._build_joined(model_name, deps, primary_cols, pk_col, ts_col)
+
+        shared_names = [c['name'] for c in shared]
+        alias_a = self._dep_alias(dep_a)
+        alias_b = self._dep_alias(dep_b)
+        if alias_a == alias_b:
+            alias_a = f"{alias_a}_a"
+            alias_b = f"{alias_b}_b"
+
+        # CTEs drop to shared cols — that's a real projection (fewer cols than
+        # the source), so they're not pass-throughs.
+        cte_a_dropped = len(shared_names) < len(a_cols)
+        cte_b_dropped = len(shared_names) < len(b_cols)
+        if not (cte_a_dropped or cte_b_dropped):
+            # Schemas fully overlap — union directly from refs, no CTEs.
+            cols_sql = ",\n    ".join(shared_names)
+            outer = (
+                f"select\n    {cols_sql}\nfrom {self._ref(dep_a)}\n"
+                f"union all\n"
+                f"select\n    {cols_sql}\nfrom {self._ref(dep_b)}"
+            )
+            return [], outer, list(shared)
+
+        cte_a_body = self._format_select(shared_names, self._ref(dep_a))
+        cte_b_body = self._format_select(shared_names, self._ref(dep_b))
+        cols_sql = ",\n    ".join(shared_names)
+        outer = (
+            f"select\n    {cols_sql}\nfrom {alias_a}\n"
+            f"union all\n"
+            f"select\n    {cols_sql}\nfrom {alias_b}"
+        )
+        return [(alias_a, cte_a_body), (alias_b, cte_b_body)], outer, list(shared)
+
+    def _build_transformed(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """No CTE — outer select applies string/number transformations directly."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        varchar_cols = self._get_varchar_columns(primary_cols)
+        num_cols = self._get_numeric_columns(primary_cols)
+        projections = [c['name'] for c in primary_cols]
+        output_cols = list(primary_cols)
+        added = False
+        if varchar_cols:
+            vc = varchar_cols[0]['name']
+            projections.append(f"upper({vc}) as {vc}_normalized")
+            output_cols.append({"name": f"{vc}_normalized", "type": "VARCHAR"})
+            added = True
+        if num_cols:
+            nc = num_cols[0]['name']
+            projections.append(f"round({nc}, 2) as {nc}_rounded")
+            output_cols.append({"name": f"{nc}_rounded", "type": "DECIMAL"})
+            added = True
+        if not added:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        outer = self._format_select(projections, self._ref(primary_dep))
+        return [], outer, output_cols
+
+    def _build_calculated(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """No CTE — outer select adds arithmetic columns directly."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        num_cols = self._get_numeric_columns(primary_cols)
+        projections = [c['name'] for c in primary_cols]
+        output_cols = list(primary_cols)
+        added = False
+        if len(num_cols) >= 2:
+            a, b = num_cols[0]['name'], num_cols[1]['name']
+            projections.append(f"{a} * {b} as {a}_x_{b}")
+            projections.append(f"{a} / nullif({b}, 0) as {a}_ratio")
+            output_cols.append({"name": f"{a}_x_{b}", "type": "DECIMAL"})
+            output_cols.append({"name": f"{a}_ratio", "type": "DECIMAL"})
+            added = True
+        elif len(num_cols) == 1:
+            a = num_cols[0]['name']
+            projections.append(f"{a} * 1.1 as {a}_plus_10pct")
+            output_cols.append({"name": f"{a}_plus_10pct", "type": "DECIMAL"})
+            added = True
+        if not added:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        outer = self._format_select(projections, self._ref(primary_dep))
+        return [], outer, output_cols
+
+    def _build_derived(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """CTE attaches a row-number; outer filters to latest-per-PK and adds a
+        window sum. Real work in both layers."""
+        primary_dep = deps[0]
+        if not primary_cols or not pk_col:
+            return self._build_passthrough(model_name, deps, primary_cols, pk_col, ts_col)
+
+        order_col = ts_col or pk_col
+        num_cols = self._get_numeric_columns(primary_cols)
+        cat_cols = self._get_categorical_columns(primary_cols)
+
+        cte_projections = [c['name'] for c in primary_cols] + [
+            f"row_number() over (partition by {pk_col} order by {order_col} desc) as _rn"
+        ]
+        cte_body = self._format_select(cte_projections, self._ref(primary_dep))
+
+        outer_projections = [c['name'] for c in primary_cols]
+        output_cols = list(primary_cols)
+        if num_cols and cat_cols:
+            nc = num_cols[0]['name']
+            gc = cat_cols[0]['name']
+            outer_projections.append(
+                f"sum({nc}) over (partition by {gc}) as {nc}_group_total"
+            )
+            output_cols.append({"name": f"{nc}_group_total", "type": "DECIMAL"})
+        outer = self._format_select(outer_projections, "base", where="_rn = 1")
+        return [("base", cte_body)], outer, output_cols
+
+    # =========================================================================
+    # MARTS SQL GENERATION
+    # =========================================================================
+    # Same principle as intermediate: dispatch on the prefix (fct/dim/*) and
+    # have each builder decide whether any CTE is justified. Pure pass-through
+    # wrappers are never emitted.
 
     def _generate_marts_sql(self, model_name, deps, mat_type):
-        """Generate marts model SQL with prefix-aware patterns (fct/dim/rpt)."""
+        """Generate marts model SQL dispatched on the prefix (fct/dim/rpt/etc)."""
         if not deps:
             self._model_columns[model_name] = [{"name": "id", "type": "INTEGER"}]
-            return f'''{{{{ config(materialized='{mat_type}') }}}}
-
--- Marts model: {model_name}
-
-select
-    1 as id,
-    current_timestamp() as created_at
-'''
+            return (
+                f"{{{{ config(materialized='{mat_type}') }}}}\n\n"
+                f"-- Marts model: {model_name}\n\n"
+                f"select\n    1 as id,\n    current_timestamp() as created_at\n"
+            )
 
         primary_dep = deps[0]
         primary_cols = self._get_model_columns(primary_dep)
-        all_deps_comment = ', '.join(deps)
 
-        # Find PK and timestamp for incremental config
         pk_col = None
         for c in primary_cols:
             if c.get('is_primary_key') or c['name'].endswith('_id'):
@@ -2889,150 +3371,183 @@ select
             uk = pk_col or 'id'
             config += f", unique_key='{uk}', incremental_strategy='merge', on_schema_change='append_new_columns'"
 
-        # Build CTEs — no incremental WHERE filter (same rationale as intermediate)
-        # Build CTE lookup — we'll filter to only deps actually used in the body
-        _all_cte_parts = {}
-        for dep in deps:
-            dep_cols = self._get_model_columns(dep)
-            col_select = ", ".join([c['name'] for c in dep_cols]) if dep_cols else "*"
-            _all_cte_parts[dep] = (
-                f"    {dep} as (\n        select {col_select}\n"
-                f"        from {{{{ ref('{dep}') }}}}\n    )"
+        if model_name.startswith("fct_"):
+            ctes, outer_sql, output_cols = self._build_fact(
+                model_name, deps, primary_cols, pk_col, ts_col
+            )
+        elif model_name.startswith("dim_"):
+            ctes, outer_sql, output_cols = self._build_dimension(
+                model_name, deps, primary_cols, pk_col, ts_col
+            )
+        else:
+            ctes, outer_sql, output_cols = self._build_report(
+                model_name, deps, primary_cols, pk_col, ts_col
             )
 
-        # Determine model type from prefix
+        self._model_columns[model_name] = output_cols
+        return self._render_model(model_name, config, "Marts model", ctes, outer_sql)
+
+    def _build_fact(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Fact table: project keys/timestamps/measures from the primary dep.
+        If a second dep exists with a shared _id, LEFT JOIN it inline (no CTEs)
+        and dedup if the join isn't PK-safe."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return [], f"select * from {self._ref(primary_dep)}", []
+
+        alias_a = self._dep_alias(primary_dep)
+        id_cols = [c for c in primary_cols if c['name'].endswith('_id')]
+        num_cols = self._get_numeric_columns(primary_cols)
+        ts_cols = [
+            c for c in primary_cols
+            if c.get('type', '').upper() in ('TIMESTAMP', 'TIMESTAMP_NTZ', 'DATE')
+            or c['name'] in ('created_at', 'order_date', 'transaction_date',
+                             'event_timestamp', 'payment_date')
+        ]
+
         output_cols = []
-        if model_name.startswith("fct_"):
-            # Fact table: select keys, measures, timestamps from primary; join if multiple deps
-            select_exprs = []
-            id_cols = [c for c in primary_cols if c['name'].endswith('_id')]
-            num_cols = self._get_numeric_columns(primary_cols)
-            ts_cols = [c for c in primary_cols if c.get('type', '').upper() in
-                       ('TIMESTAMP', 'TIMESTAMP_NTZ', 'DATE') or c['name'] in
-                       ('created_at', 'order_date', 'transaction_date', 'event_timestamp', 'payment_date')]
+        projections = []
+        seen = set()
 
-            for c in id_cols:
-                select_exprs.append(f"{primary_dep}.{c['name']}")
-                output_cols.append(c)
-            for c in ts_cols:
-                if c not in id_cols:
-                    select_exprs.append(f"{primary_dep}.{c['name']}")
-                    if c not in output_cols:
-                        output_cols.append(c)
-            for c in num_cols:
-                if c not in id_cols and c not in ts_cols:
-                    select_exprs.append(f"{primary_dep}.{c['name']}")
-                    if c not in output_cols:
-                        output_cols.append(c)
+        def add(col, expr):
+            if col['name'] in seen:
+                return
+            seen.add(col['name'])
+            projections.append(expr)
+            output_cols.append(col)
 
-            # If we have a second dep, try to join and pull extra columns
-            join_clause = ""
-            needs_dedup = False
-            if len(deps) >= 2:
-                dep_b = deps[1]
-                b_cols = self._get_model_columns(dep_b)
-                join_key = self._find_join_key(primary_cols, b_cols)
-                if join_key and b_cols:
-                    join_clause = f"\nleft join {dep_b}\n    on {primary_dep}.{join_key} = {dep_b}.{join_key}"
-                    for c in b_cols[:3]:
-                        if c['name'] != join_key and c['name'] not in [oc['name'] for oc in output_cols]:
-                            alias = c['name']
-                            select_exprs.append(f"{dep_b}.{alias}")
-                            output_cols.append({"name": alias, "type": c.get('type', 'VARCHAR')})
-                    # Check if join key is PK on right side — if not, dedup needed
-                    b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
-                    needs_dedup = join_key.lower() not in b_pks and pk_col
+        for c in id_cols:
+            add(c, f"{alias_a}.{c['name']}")
+        for c in ts_cols:
+            add(c, f"{alias_a}.{c['name']}")
+        for c in num_cols:
+            add(c, f"{alias_a}.{c['name']}")
 
-            if not select_exprs:
-                select_exprs = [f"{primary_dep}.*"]
-                output_cols = list(primary_cols)
-
-            select_sql = ",\n    ".join(select_exprs)
-            if needs_dedup and join_clause:
-                inner_select = ",\n        ".join(select_exprs)
-                body = (
-                    f"select * from (\n"
-                    f"    select\n        {inner_select},\n"
-                    f"        row_number() over (partition by {primary_dep}.{pk_col} order by {primary_dep}.{pk_col}) as _dedup_rn\n"
-                    f"    from {primary_dep}{join_clause}\n"
-                    f") where _dedup_rn = 1"
-                )
-            else:
-                body = f"select\n    {select_sql}\nfrom {primary_dep}{join_clause}"
-
-        elif model_name.startswith("dim_"):
-            # Dimension table: select descriptive attributes, deduplicate if possible
-            select_cols = [c['name'] for c in primary_cols]
+        if not projections:
+            projections = [f"{alias_a}.*"]
             output_cols = list(primary_cols)
 
-            if pk_col and ts_col and len(primary_cols) > 2:
-                # SCD Type 1: keep latest row per PK
-                inner_select = ",\n        ".join(select_cols)
-                body = (
-                    f"select\n    {', '.join(select_cols)}\n"
-                    f"from (\n"
-                    f"    select\n        {inner_select},\n"
-                    f"        row_number() over (partition by {pk_col} order by {ts_col} desc) as _rn\n"
-                    f"    from {primary_dep}\n"
-                    f")\nwhere _rn = 1"
+        # Optional second dep → inline LEFT JOIN, no wrapper CTEs.
+        join_clause = ""
+        needs_dedup = False
+        if len(deps) >= 2:
+            dep_b = deps[1]
+            b_cols = self._get_model_columns(dep_b)
+            join_key = self._find_join_key(primary_cols, b_cols)
+            if join_key and b_cols:
+                alias_b = self._dep_alias(dep_b)
+                if alias_b == alias_a:
+                    alias_b = f"{alias_b}_b"
+                join_clause = (
+                    f"\nleft join {self._ref(dep_b)} as {alias_b}\n"
+                    f"    on {alias_a}.{join_key} = {alias_b}.{join_key}"
                 )
-            else:
-                select_sql = ",\n    ".join(select_cols)
-                body = f"select distinct\n    {select_sql}\nfrom {primary_dep}"
+                for c in b_cols[:3]:
+                    if c['name'] != join_key and c['name'] not in seen:
+                        projections.append(f"{alias_b}.{c['name']}")
+                        output_cols.append({
+                            "name": c['name'],
+                            "type": c.get('type', 'VARCHAR'),
+                        })
+                        seen.add(c['name'])
+                b_pks = {c['name'].lower() for c in b_cols if c.get('is_primary_key')}
+                needs_dedup = join_key.lower() not in b_pks and pk_col
 
-        else:
-            # Report/agg/summary/kpi: aggregate by time and/or category
-            cat_cols = self._get_categorical_columns(primary_cols)
-            num_cols = self._get_numeric_columns(primary_cols)
+        from_clause = f"{self._ref(primary_dep)} as {alias_a}{join_clause}"
 
-            group_cols = []
-            select_exprs = []
+        if needs_dedup:
+            dedup_projections = list(projections) + [
+                f"row_number() over (partition by {alias_a}.{pk_col} "
+                f"order by {alias_a}.{pk_col}) as _dedup_rn"
+            ]
+            inner_sql = self._format_select(dedup_projections, from_clause)
+            outer_names = [
+                p.split(" as ")[-1] if " as " in p else p.split(".")[-1]
+                for p in projections
+            ]
+            outer = (
+                f"select\n    "
+                + ",\n    ".join(outer_names)
+                + f"\nfrom (\n    "
+                + inner_sql.replace("\n", "\n    ")
+                + f"\n) as joined_rows\nwhere _dedup_rn = 1"
+            )
+            return [], outer, output_cols
 
-            if ts_col:
-                select_exprs.append(f"date_trunc('day', {ts_col}) as report_date")
-                group_cols.append(f"date_trunc('day', {ts_col})")
-                output_cols.append({"name": "report_date", "type": "DATE"})
-            if cat_cols:
-                cc = cat_cols[0]['name']
-                select_exprs.append(cc)
-                group_cols.append(cc)
-                output_cols.append({"name": cc, "type": "VARCHAR"})
+        outer = self._format_select(projections, from_clause)
+        return [], outer, output_cols
 
-            select_exprs.append("count(*) as record_count")
-            output_cols.append({"name": "record_count", "type": "INTEGER"})
-            for nc in num_cols[:3]:
-                select_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
-                select_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
-                output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
-                output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
+    def _build_dimension(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Dimension: if we have a pk + timestamp, emit SCD-1 (latest row per PK)
+        using a `ranked` CTE with row_number — real window work. Otherwise emit
+        `select distinct` directly with no CTE."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return [], f"select * from {self._ref(primary_dep)}", []
 
-            if not group_cols:
-                # No grouping possible — just select from primary
-                select_cols = [c['name'] for c in primary_cols] if primary_cols else ["*"]
-                output_cols = list(primary_cols)
-                select_sql = ",\n    ".join(select_cols)
-                body = f"select\n    {select_sql}\nfrom {primary_dep}"
-            else:
-                select_sql = ",\n    ".join(select_exprs)
-                group_sql = ", ".join(group_cols)
-                body = f"select\n    {select_sql}\nfrom {primary_dep}\ngroup by {group_sql}"
+        select_names = [c['name'] for c in primary_cols]
 
-        self._model_columns[model_name] = output_cols
+        if pk_col and ts_col and len(primary_cols) > 2:
+            cte_projections = list(select_names) + [
+                f"row_number() over (partition by {pk_col} order by {ts_col} desc) as _rn"
+            ]
+            cte_body = self._format_select(cte_projections, self._ref(primary_dep))
+            outer = self._format_select(select_names, "ranked", where="_rn = 1")
+            return [("ranked", cte_body)], outer, list(primary_cols)
 
-        # Only include CTEs that are actually referenced in the body
-        used_ctes = [_all_cte_parts[dep] for dep in deps if dep in _all_cte_parts and dep in body]
-        ctes_sql = ",\n\n".join(used_ctes) if used_ctes else f"    {primary_dep} as (select * from {{{{ ref('{primary_dep}') }}}})"
+        # No PK+timestamp — distinct directly from ref, no pass-through CTE.
+        distinct_cols = ",\n    ".join(select_names)
+        outer = (
+            f"select distinct\n    {distinct_cols}\n"
+            f"from {self._ref(primary_dep)}"
+        )
+        return [], outer, list(primary_cols)
 
-        return f'''{{{{ config({config}) }}}}
+    def _build_report(self, model_name, deps, primary_cols, pk_col, ts_col):
+        """Report/aggregate/summary/kpi: group by time and/or category with
+        sum/avg measures. If no group-by is possible, fall back to passthrough
+        (no CTE)."""
+        primary_dep = deps[0]
+        if not primary_cols:
+            return [], f"select * from {self._ref(primary_dep)}", []
 
--- Marts model: {model_name}
--- Dependencies: {all_deps_comment}
+        cat_cols = self._get_categorical_columns(primary_cols)
+        num_cols = self._get_numeric_columns(primary_cols)
 
-with
-{ctes_sql}
+        group_exprs = []
+        select_exprs = []
+        output_cols = []
 
-{body}
-'''
+        if ts_col:
+            select_exprs.append(f"date_trunc('day', {ts_col}) as report_date")
+            group_exprs.append(f"date_trunc('day', {ts_col})")
+            output_cols.append({"name": "report_date", "type": "DATE"})
+        if cat_cols:
+            cc = cat_cols[0]['name']
+            select_exprs.append(cc)
+            group_exprs.append(cc)
+            output_cols.append({"name": cc, "type": "VARCHAR"})
+
+        if not group_exprs:
+            # No grouping possible — just pass through.
+            projections = [c['name'] for c in primary_cols]
+            outer = self._format_select(projections, self._ref(primary_dep))
+            return [], outer, list(primary_cols)
+
+        select_exprs.append("count(*) as record_count")
+        output_cols.append({"name": "record_count", "type": "INTEGER"})
+        for nc in num_cols[:3]:
+            select_exprs.append(f"sum({nc['name']}) as total_{nc['name']}")
+            select_exprs.append(f"avg({nc['name']}) as avg_{nc['name']}")
+            output_cols.append({"name": f"total_{nc['name']}", "type": "DECIMAL"})
+            output_cols.append({"name": f"avg_{nc['name']}", "type": "DECIMAL"})
+
+        # Aggregate directly from ref — no CTE wrapper needed. GROUP BY itself
+        # is the transformation.
+        group_sql = ", ".join(group_exprs)
+        outer = self._format_select(select_exprs, self._ref(primary_dep),
+                                     group_by=group_sql)
+        return [], outer, output_cols
 
     def _generate_sources_yml(self, schema=None):
         """Generate sources.yml from the ACTUAL schema - no num_sources parameter.
@@ -3716,7 +4231,32 @@ def render_pipeline_config():
         st.markdown("**Model Structure**")
         num_models = st.number_input("Total Number of Models", min_value=10, max_value=10000, value=200, step=10, key="config_num_models")
         num_sources = st.number_input("Number of Source Tables", min_value=1, max_value=100, value=6, step=1, key="config_num_sources")
-        
+
+        # Cone-shape feasibility check: warn if num_models is too low to form a
+        # staging → int × 3 → marts → reports cone. Recommend a model count that
+        # fits a proper cone; button lets the user accept it in one click.
+        min_supported = minimum_supported_model_count(num_sources)
+        recommended = recommended_model_count(num_sources)
+        l1_w, l2_w, l3_w, mart_w, rpt_w = compute_cone_widths(num_sources, max(num_models, min_supported))
+        cone_preview = f"stg={num_sources} → L1={l1_w} → L2={l2_w} → L3={l3_w} → marts={mart_w} → reports={rpt_w}"
+        if num_models < min_supported:
+            st.warning(
+                f"⚠️ With {num_sources} sources, a proper cone needs at least "
+                f"{min_supported} models (stg + 5 downstream layers). "
+                f"Current value will collapse narrow layers."
+            )
+        elif num_models < recommended:
+            st.info(
+                f"💡 For a well-tapered cone with {num_sources} sources, "
+                f"~{recommended} models is recommended. Current: {cone_preview}"
+            )
+        else:
+            st.caption(f"Cone preview: {cone_preview}")
+        if num_models < recommended:
+            if st.button(f"Use recommended: {recommended}", key="config_apply_recommended"):
+                st.session_state["config_num_models"] = recommended
+                st.rerun()
+
         st.markdown("**Materialization Distribution**")
         use_exact_counts = st.checkbox("Specify exact model counts (instead of percentages)", key="config_use_exact_counts")
         
