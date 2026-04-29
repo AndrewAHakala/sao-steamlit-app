@@ -14,6 +14,56 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 import anthropic
+from pydantic import BaseModel, Field
+
+
+# =============================================================================
+# Pydantic models for structured schema output
+# =============================================================================
+# Used with anthropic's messages.parse() to guarantee Claude returns valid,
+# schema-conforming JSON for schema generation. Replaces ad-hoc JSON parsing
+# (which broke when the model occasionally emitted malformed JSON, e.g.
+# "is_primary_key" with no value before the comma).
+
+
+class SchemaColumn(BaseModel):
+    """One column in a generated source table."""
+    name: str = Field(description="Column name in snake_case")
+    type: str = Field(
+        description="Snowflake type: VARCHAR, INTEGER, DECIMAL, TIMESTAMP, DATE, or BOOLEAN"
+    )
+    description: str = Field(description="What this column represents")
+    is_primary_key: bool = Field(
+        default=False, description="True if this is the table's primary key"
+    )
+    sample_values: List[str] = Field(
+        default_factory=list,
+        description=(
+            "For VARCHAR columns: 4-6 realistic, business-specific sample values. "
+            "Empty list for non-VARCHAR columns."
+        ),
+    )
+
+
+class SchemaSource(BaseModel):
+    """One source table in the generated schema."""
+    name: str = Field(description="Table name in snake_case (operational, not dim_/fact_)")
+    description: str = Field(description="What this table stores")
+    columns: List[SchemaColumn]
+
+
+class SchemaRelationship(BaseModel):
+    """One FK -> PK relationship between source tables."""
+    from_table: str
+    from_column: str
+    to_table: str
+    to_column: str
+
+
+class GeneratedSchema(BaseModel):
+    """Top-level schema returned by Claude for synthetic data generation."""
+    sources: List[SchemaSource]
+    relationships: List[SchemaRelationship] = Field(default_factory=list)
 
 
 # Snowflake reserved keywords — columns named with these get suffixed with _COL
@@ -142,27 +192,38 @@ class SyntheticDataGenerator:
             customer_description, num_sources, num_columns, sample_ddl
         )
 
-        with self.client.messages.stream(
-            model=self.SCHEMA_MODEL,
-            max_tokens=16000,
-            temperature=0.5,
-            system="You are a data architect. Return only valid JSON, no markdown formatting.",
-            messages=[{"role": "user", "content": prompt}],
-        ) as stream:
-            content = stream.get_final_text().strip()
-
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            content = re.sub(r'^```(?:json)?\n?', '', content)
-            content = re.sub(r'\n?```$', '', content)
-
+        # Use messages.parse() with a Pydantic schema so the API guarantees
+        # well-formed JSON matching our shape. Replaces a previous streaming
+        # call + manual json.loads that occasionally choked on malformed JSON
+        # (e.g. "is_primary_key" with no value before the comma).
         try:
-            schema = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise ValueError(
-                f"Claude returned invalid JSON for schema generation: {e}\n"
-                f"Response preview: {content[:500]}"
+            response = self.client.messages.parse(
+                model=self.SCHEMA_MODEL,
+                max_tokens=16000,
+                temperature=0.5,
+                system="You are a data architect designing source-system schemas.",
+                messages=[{"role": "user", "content": prompt}],
+                output_format=GeneratedSchema,
             )
+        except anthropic.APIError:
+            raise
+
+        if response.parsed_output is None:
+            # Should be rare with structured outputs, but handle it: most likely
+            # a refusal or a max_tokens cutoff.
+            preview = ""
+            for block in response.content:
+                if getattr(block, "type", None) == "text":
+                    preview = (block.text or "")[:500]
+                    break
+            raise ValueError(
+                "Claude did not return parseable schema output "
+                f"(stop_reason={response.stop_reason}). Response preview: {preview}"
+            )
+
+        # Convert Pydantic model -> plain dict so the rest of the pipeline
+        # (which expects dicts/lists) keeps working unchanged.
+        schema = response.parsed_output.model_dump()
 
         sources = schema.get("sources", [])
         if not sources:
